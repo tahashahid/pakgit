@@ -3,6 +3,7 @@ productName: PakGit
 directories:
   buildResources: build
   output: dist
+icon: build/icon.png
 files:
   - out/**
   - package.json

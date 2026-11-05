@@ -2,6 +2,7 @@ import React from 'react'
 import { useStore } from '@/lib/store'
 import { Btn, Icon } from './ui'
 import { useActions } from '@/lib/actions'
+import logo from '@/assets/logo.svg'
 
 export function Toolbar(): JSX.Element {
   const { repo, status, busy, perspective, setPerspective, theme, toggleTheme, refresh, setShowSettings } = useStore()
@@ -10,6 +11,7 @@ export function Toolbar(): JSX.Element {
   const mac = window.pakgitMenu.platform === 'darwin'
   return (
     <div className={`toolbar ${mac ? 'mac' : ''}`}>
+      <img src={logo} alt="PakGit" width={22} height={22} style={{ borderRadius: 5, margin: '0 6px 0 2px' }} />
       <div className="tool-group">
         <Btn title="Open repository (Cmd/Ctrl+O)" onClick={() => a.openRepo()}><Icon name="folder" />Open</Btn>
         <Btn title="Clone repository" onClick={() => a.clone()}>Clone</Btn>

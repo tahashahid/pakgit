@@ -12,6 +12,7 @@ import { Btn, Dialog, Split, Toasts } from './components/ui'
 import { RebaseDialog } from './components/RebaseDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { useActions } from './lib/actions'
+import logo from './assets/logo.svg'
 
 function Layout(): JSX.Element {
   const { repo, perspective, status, busy, error } = useStore()
@@ -40,6 +41,7 @@ function Layout(): JSX.Element {
   if (!repo) {
     return (
       <div className="welcome">
+        <img src={logo} alt="" width={96} height={96} style={{ borderRadius: 22 }} />
         <h1>PakGit</h1>
         <p>A cross-platform Git client. Open an existing repository, clone one, or initialize a new one.</p>
         <div className="actions">

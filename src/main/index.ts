@@ -72,6 +72,7 @@ function createWindow(): BrowserWindow {
     title: 'PakGit',
     show: false,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    icon: process.platform === 'linux' ? join(__dirname, '../../build/icon.png') : undefined,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#1e1f22' : '#f3f4f6',
     webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: false, contextIsolation: true }
   })
