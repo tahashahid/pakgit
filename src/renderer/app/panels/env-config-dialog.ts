@@ -35,6 +35,8 @@ import type { EnvConfig, Environment } from '@shared/types'
             <label class="field"><span>New feature branches start from</span>
               <select (change)="set({ baseEnv: $any($event.target).value })">@for (e of c.environments; track e.id + $index) { <option [value]="e.id" [selected]="e.id === c.baseEnv">{{ e.name || e.branch }} ({{ e.branch }})</option> }</select></label>
             <label class="field field-check"><input type="checkbox" [checked]="c.backMerge" (change)="set({ backMerge: $any($event.target).checked })" /><span>After a release, merge it back into every earlier environment</span></label>
+            <label class="field"><span>Issue key prefixes</span><input class="mono" [value]="c.issuePrefixes.join(', ')" placeholder="empty = from Linear teams" (input)="set({ issuePrefixes: split($any($event.target).value) })" /><small class="hint">Only these prefixes count as issues (e.g. CYB4, CYB2). Stops words like UNDICI-7 being read as tickets.</small></label>
+            <label class="field"><span>Ignored branch prefixes</span><input class="mono" [value]="c.excludePrefixes.join(', ')" (input)="set({ excludePrefixes: split($any($event.target).value) })" /><small class="hint">Branches starting with these are never work items.</small></label>
           </div>
           @if (error()) { <p class="modal-message" style="color:var(--danger)">{{ error() }}</p> }
           <div class="modal-actions">
@@ -54,6 +56,7 @@ export class EnvConfigDialog {
   readonly error = signal('')
   constructor() { effect(() => { const c = this.initial(); this.cfg.set(c ? structuredClone(c) : null); this.error.set('') }) }
   set(patch: Partial<EnvConfig>): void { this.cfg.update((c) => (c ? { ...c, ...patch } : c)) }
+  split(v: string): string[] { return v.split(',').map((x) => x.trim()).filter(Boolean) }
   upd(i: number, patch: Partial<Environment>): void {
     this.cfg.update((c) => {
       if (!c) return c

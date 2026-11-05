@@ -215,3 +215,8 @@ pg-release { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .env-row .env-move { display: inline-flex; gap: 2px; }
 .env-chip { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg3); display: inline-flex; gap: 5px; align-items: center; }
 .field code { font-family: var(--mono); background: var(--bg3); padding: 0 4px; border-radius: 3px; user-select: all; }
+.filter-bar { display: flex; align-items: center; gap: 6px; padding: 0 6px 0 0; border-bottom: 1px solid var(--border); background: var(--bg2); flex-wrap: wrap; }
+.filter-bar .filter-input { flex: 1; min-width: 160px; border-bottom: 0; }
+.filter-bar select, .filter-bar input[type="date"] { padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg1); color: var(--fg1); font-size: 12px; }
+.filter-bar label { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; color: var(--fg-muted); white-space: nowrap; }
+.release-table td.env.manual { color: var(--warning); }

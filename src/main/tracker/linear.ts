@@ -20,7 +20,7 @@ export class LinearProvider implements TrackerProvider {
   configure(s: TrackerSettings): void {
     const prev = this.settings
     this.settings = { ...s }
-    if (!prev || prev.authMethod !== s.authMethod || prev.linearApiKey !== s.linearApiKey || prev.linearAccessToken !== s.linearAccessToken) { this.cache.clear(); this.stateCache.clear() }
+    if (!prev || prev.authMethod !== s.authMethod || prev.linearApiKey !== s.linearApiKey || prev.linearAccessToken !== s.linearAccessToken) { this.cache.clear(); this.stateCache.clear(); this.prefixCache = null }
   }
   isConfigured(): boolean {
     const s = this.settings; if (!s) return false
@@ -120,6 +120,15 @@ export class LinearProvider implements TrackerProvider {
       this.stateCache.set(team, d.workflowStates.nodes)
     }
     return this.stateCache.get(team)!
+  }
+  private prefixCache: string[] | null = null
+  async keyPrefixes(): Promise<string[]> {
+    if (!this.isConfigured()) return []
+    if (!this.prefixCache) {
+      try { const d = await this.gql<{ teams: { nodes: { key: string }[] } }>('{ teams(first: 100) { nodes { key } } }'); this.prefixCache = d.teams.nodes.map((t) => t.key.toUpperCase()) }
+      catch { return [] }
+    }
+    return this.prefixCache
   }
   async states(key: string): Promise<string[]> { return (await this.teamStates(this.normalizeKey(key).split('-')[0])).map((s) => s.name) }
 

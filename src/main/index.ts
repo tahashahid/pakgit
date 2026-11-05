@@ -7,7 +7,7 @@ import * as git from './git'
 import * as release from './release'
 import { configureTracker, tracker } from './tracker'
 import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
-import type { CommitOptions, DiffRequest, FileArea, RepoEntry } from '@shared/types'
+import type { BranchTarget, CommitOptions, DiffRequest, FileArea, PrepareOptions, RepoEntry } from '@shared/types'
 
 // ---------- repository registry ----------
 
@@ -344,6 +344,9 @@ function registerIpc(): void {
   handle('release:finish', (repo: string, env: string, branch: string, tag: string | null, push: boolean) => release.finishRelease(repo, env, branch, tag, push))
   handle('release:detectConfig', (repo: string) => release.detectConfig(repo))
   handle('release:sync', (repo: string, push: boolean) => release.syncEnvironments(repo, push))
+  handle('release:prepareBranch', (repo: string, env: string, target: BranchTarget, items: release.PromoteInput[], options: PrepareOptions) => release.prepareBranch(repo, env, target, items, options))
+  handle('release:setArchived', (repo: string, ids: string[], archived: boolean) => release.setArchived(repo, ids, archived))
+  handle('release:setOverrides', (repo: string, id: string, o: Record<string, boolean> | null) => release.setOverrides(repo, id, o))
   handle('release:openFeaturePRs', (repo: string, env: string, items: release.PromoteInput[]) => release.openFeaturePRs(repo, env, items))
   handle('release:openPR', (repo: string, head: string, base: string, title: string, body: string) => release.openPullRequest(repo, head, base, title, body))
   handle('release:startIssue', (repo: string, _key: string, branchName: string) => release.startIssue(repo, branchName))

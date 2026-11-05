@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import * as git from './git'
 import { tracker } from './tracker'
-import type { Commit, EnvConfig, Environment, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
+import type { BranchTarget, Commit, EnvConfig, Environment, PrepareOptions, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
 
 // ---------- pull requests on the hosting provider ----------
 
@@ -59,18 +59,21 @@ export async function detectConfig(repo: string): Promise<EnvConfig> {
   const stage = STAGE.find((c) => names.has(c)); if (stage) envs.push({ id: 'stage', name: 'Staging', branch: stage, strategy: 'release-branch', trackerState: 'UAT' })
   const prod = PROD.find((c) => names.has(c)) ?? 'main'
   envs.push({ id: 'prod', name: 'Production', branch: prod, strategy: 'release-branch', trackerState: 'Done' })
-  return { remote, environments: envs, baseEnv: 'prod', releasePrefix: 'release/', backMerge: true }
+  return { remote, environments: envs, baseEnv: 'prod', releasePrefix: 'release/', backMerge: true, issuePrefixes: [], excludePrefixes: ['release/', 'sync/', 'dependabot/'] }
+}
+function withDefaults(c: EnvConfig): EnvConfig {
+  return { ...c, issuePrefixes: c.issuePrefixes ?? [], excludePrefixes: c.excludePrefixes ?? ['release/', 'sync/', 'dependabot/'] }
 }
 
 /** Upgrade a config saved by an earlier version (fixed dev/stage/prod fields). */
 function migrate(raw: Record<string, unknown>): EnvConfig | null {
-  if (Array.isArray(raw['environments'])) return raw as unknown as EnvConfig
+  if (Array.isArray(raw['environments'])) return withDefaults(raw as unknown as EnvConfig)
   if (typeof raw['prod'] === 'string') {
     const envs: Environment[] = []
     if (raw['dev']) envs.push({ id: 'dev', name: 'Development', branch: String(raw['dev']), strategy: 'feature-pr', trackerState: 'QA' })
     if (raw['stage']) envs.push({ id: 'stage', name: 'Staging', branch: String(raw['stage']), strategy: 'release-branch', trackerState: 'UAT' })
     envs.push({ id: 'prod', name: 'Production', branch: String(raw['prod']), strategy: 'release-branch', trackerState: 'Done' })
-    return { remote: String(raw['remote'] ?? 'origin'), environments: envs, baseEnv: 'prod', releasePrefix: String(raw['releasePrefix'] ?? 'release/'), backMerge: true }
+    return withDefaults({ remote: String(raw['remote'] ?? 'origin'), environments: envs, baseEnv: 'prod', releasePrefix: String(raw['releasePrefix'] ?? 'release/'), backMerge: true } as EnvConfig)
   }
   return null
 }
@@ -90,6 +93,9 @@ export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
     if (ids.has(e.id)) throw new Error(`Duplicate environment id "${e.id}"`); ids.add(e.id)
   }
   if (!ids.has(cfg.baseEnv)) cfg.baseEnv = cfg.environments[cfg.environments.length - 1].id
+  cfg = withDefaults(cfg)
+  cfg.issuePrefixes = cfg.issuePrefixes.map((p) => p.trim().toUpperCase()).filter(Boolean)
+  cfg.excludePrefixes = cfg.excludePrefixes.map((p) => p.trim()).filter(Boolean)
   const all = loadAll(); all[repo] = cfg
   mkdirSync(dirname(cfgFile()), { recursive: true }); writeFileSync(cfgFile(), JSON.stringify(all, null, 2))
   return cfg
@@ -97,6 +103,25 @@ export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
 const envById = (cfg: EnvConfig, id: string): Environment => { const e = cfg.environments.find((x) => x.id === id); if (!e) throw new Error(`Unknown environment "${id}"`); return e }
 const lastEnv = (cfg: EnvConfig): Environment => cfg.environments[cfg.environments.length - 1]
 const baseBranch = (cfg: EnvConfig): string => envById(cfg, cfg.baseEnv).branch
+
+// ---------- archive and manual environment overrides (per repository) ----------
+
+const archiveFile = () => join(configDir || process.cwd(), 'release-archive.json')
+const overridesFile = () => join(configDir || process.cwd(), 'release-overrides.json')
+const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return d } }
+const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(v, null, 2)) }
+export function setArchived(repo: string, ids: string[], archived: boolean): void {
+  const all = readJson<Record<string, string[]>>(archiveFile(), {})
+  const set = new Set(all[repo] ?? [])
+  for (const id of ids) archived ? set.add(id) : set.delete(id)
+  all[repo] = [...set]; writeJson(archiveFile(), all)
+}
+export function setOverrides(repo: string, id: string, overrides: Record<string, boolean> | null): void {
+  const all = readJson<Record<string, Record<string, Record<string, boolean>>>>(overridesFile(), {})
+  all[repo] = all[repo] ?? {}
+  if (overrides && Object.keys(overrides).length) all[repo][id] = overrides; else delete all[repo][id]
+  writeJson(overridesFile(), all)
+}
 
 // ---------- analysis ----------
 
@@ -144,6 +169,7 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
     const entry: ReleaseBranchRef = { ref, name, remote: isRemote ? cfg.remote : null, sha, date }
     if (envNames.has(name)) continue
     if (name.startsWith(cfg.releasePrefix)) { releaseBranches.push(entry); continue }
+    if (cfg.excludePrefixes.some((p) => name.startsWith(p))) continue
     // backups like dev-as-on-23rd-oct, dev_backup, main-demo
     if ([...envNames].some((e) => name === e || name.startsWith(e + '-') || name.startsWith(e + '_'))) continue
     all.push(entry)
@@ -156,25 +182,37 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   await Promise.all(cfg.environments.map(async (e) => { merged[e.id] = await mergedInto(repo, refs[e.id]) }))
   const emptyEnv = (): Record<string, boolean> => Object.fromEntries(cfg.environments.map((e) => [e.id, false]))
 
+  // which key prefixes count as issues: configured, else the tracker's team keys, else prefixes seen with 2+ numbers in branch names
+  let prefixes = new Set(cfg.issuePrefixes)
+  if (!prefixes.size) prefixes = new Set(await t.keyPrefixes().catch(() => []))
+  if (!prefixes.size) {
+    const seen = new Map<string, Set<string>>()
+    for (const b of byName.values()) { const k = b.name.match(keyRe)?.[0]?.toUpperCase(); if (k) { const [pre, num] = k.split('-'); if (!seen.has(pre)) seen.set(pre, new Set()); seen.get(pre)!.add(num) } }
+    for (const [pre, nums] of seen) if (nums.size >= 2) prefixes.add(pre)
+  }
+  const keyOf = (text: string): string | null => {
+    for (const m of text.matchAll(keyRe)) { const k = t.normalizeKey(m[0]); if (prefixes.has(k.split('-')[0])) return k }
+    return null
+  }
+  const archived = new Set(readJson<Record<string, string[]>>(archiveFile(), {})[repo] ?? [])
+  const overrides = readJson<Record<string, Record<string, Record<string, boolean>>>>(overridesFile(), {})[repo] ?? {}
+
   // group branches into items by issue key, else by normalised name (strip -dev/-stage/-main variants)
   const items = new Map<string, ReleaseItem>()
   const itemFor = (id: string, issueKey: string | null, name: string): ReleaseItem => {
     let it = items.get(id)
-    if (!it) { it = { id, issueKey, name, branches: [], inEnv: emptyEnv(), commitsAheadOfProd: null, basedOnEnv: false, needsCherryPick: false, commits: [], lastActivity: '' }; items.set(id, it) }
+    if (!it) { it = { id, issueKey, name, branches: [], inEnv: emptyEnv(), commitsAheadOfProd: null, basedOnEnv: false, needsCherryPick: false, commits: [], lastActivity: '', archived: archived.has(id), overrides: overrides[id] ?? {} }; items.set(id, it) }
     return it
   }
   for (const b of byName.values()) {
     const base = b.name.replace(ENV_SUFFIX, '')
-    const key = base.match(keyRe)?.[0]
-    const issueKey = key ? t.normalizeKey(key) : null
+    const issueKey = keyOf(base)
     const it = itemFor(issueKey ?? base.toLowerCase(), issueKey, base)
     it.branches.push(b)
     for (const e of cfg.environments) it.inEnv[e.id] ||= merged[e.id].has(b.ref)
     if (b.date > it.lastActivity) it.lastActivity = b.date
   }
 
-  // issue-key prefixes seen in branch names: commit-message keys with other prefixes are noise (e.g. "EAST-1")
-  const knownPrefixes = new Set([...items.values()].map((it) => it.issueKey?.split('-')[0]).filter((x): x is string => !!x))
 
   // commit-based pass: work on dev/stage that is not on prod, grouped by issue key (covers deleted branches)
   const envLog = async (ref: string | null): Promise<Commit[]> => {
@@ -195,10 +233,8 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   for (const e of [...earlier].reverse()) {
     for (const c of logs[e.id]) {
       if (seen.has(c.sha)) continue; seen.add(c.sha)
-      const key = `${c.subject}\n${c.body}`.match(keyRe)?.[0]
-      if (!key) continue
-      const k = t.normalizeKey(key)
-      if (knownPrefixes.size && !knownPrefixes.has(k.split('-')[0]) && !items.has(k)) continue
+      const k = keyOf(`${c.subject}\n${c.body}`)
+      if (!k) continue
       const it = itemFor(k, k, k)
       it.commits.push(c)
       for (const e2 of earlier) if (shaSets[e2.id].has(c.sha)) it.inEnv[e2.id] = true
@@ -206,6 +242,7 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
     }
   }
   for (const it of items.values()) {
+    for (const [envId, v] of Object.entries(it.overrides)) if (envId in it.inEnv) it.inEnv[envId] = v
     if (!it.branches.length) it.needsCherryPick = true
     it.commits.sort((a, b) => (a.date < b.date ? -1 : 1))
     it.branches.sort((a, b) => (a.date > b.date ? -1 : 1))
@@ -310,6 +347,47 @@ export async function startRelease(repo: string, envId: string, name: string, it
     try { const pr = await openPullRequest(repo, branch, env.branch, title, body); res.prUrls = [pr.url] } catch (e) { res.message = e instanceof Error ? e.message : String(e) }
   }
   res.message ||= `Created ${branch} from ${base} with ${res.merged.length} item(s)${push ? ', pushed and opened the pull request' : ''}`
+  return res
+}
+
+/**
+ * Merge the items into one branch: a new one cut from the environment, or an existing branch
+ * (checked out and fast-forwarded to its remote). Stops at the first conflict and reports the
+ * remaining items so the promotion can be continued after the merge is committed.
+ */
+export async function prepareBranch(repo: string, envId: string, target: BranchTarget, items: PromoteInput[], options: PrepareOptions): Promise<PromoteResult & { remaining?: PromoteInput[] }> {
+  const cfg = await releaseConfig(repo)
+  const env = envById(cfg, envId)
+  const st = await git.status(repo)
+  if (st.files.some((f) => f.area !== 'untracked')) throw new Error('Working tree has uncommitted changes. Commit or stash them first.')
+  if (st.state !== 'clean') throw new Error(`A ${st.state} is in progress. Finish or abort it first.`)
+  const branch = target.name.trim()
+  if (!branch) throw new Error('Branch name is empty')
+  const localExists = (await run(repo, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`], true)).code === 0
+  const remoteExists = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${branch}`], true)).code === 0
+  if (target.existing) {
+    if (!localExists && !remoteExists) throw new Error(`Branch "${branch}" does not exist`)
+    if (localExists) await run(repo, ['checkout', branch]); else await run(repo, ['checkout', '-b', branch, '--track', `${cfg.remote}/${branch}`])
+    if (localExists && remoteExists) await run(repo, ['merge', '--ff-only', `${cfg.remote}/${branch}`], true)
+  } else {
+    if (localExists || remoteExists) throw new Error(`Branch "${branch}" already exists; choose "existing branch" to add to it`)
+    const base = remoteExists ? '' : (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${env.branch}`], true)).code === 0 ? `${cfg.remote}/${env.branch}` : env.branch
+    await run(repo, ['checkout', '-b', branch, base])
+  }
+  const res: PromoteResult & { remaining?: PromoteInput[] } = { ...(await applyItems(repo, items, branch)), branch }
+  if (res.conflict) {
+    const idx = items.findIndex((i) => i.id === res.conflict)
+    res.remaining = items.slice(idx + 1)
+    res.message = `Conflict while merging ${res.conflict} into ${branch}. Resolve it in the Files panel and commit the merge; then continue with the remaining ${res.remaining.length} item(s).`
+    return res
+  }
+  if (options.push) await run(repo, ['push', '-u', cfg.remote, branch])
+  if (options.push && options.openPr) {
+    const title = branch.startsWith(cfg.releasePrefix) ? `Release ${branch.replace(cfg.releasePrefix, '')} → ${env.branch}` : `${branch} → ${env.branch}`
+    const body = `Items:\n${[...res.merged, ...res.skipped].map((m) => `- ${m}`).join('\n')}\n\nCreated by PakGit.`
+    try { const pr = await openPullRequest(repo, branch, env.branch, title, body); res.prUrls = [pr.url] } catch (e) { res.message = e instanceof Error ? e.message : String(e) }
+  }
+  res.message ||= `${target.existing ? 'Updated' : 'Created'} ${branch} with ${res.merged.length} item(s)${res.skipped.length ? ` (${res.skipped.length} already included)` : ''}${options.push ? ', pushed' : ''}${options.push && options.openPr ? ' and opened the pull request' : ''}`
   return res
 }
 

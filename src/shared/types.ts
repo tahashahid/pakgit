@@ -284,6 +284,10 @@ export interface EnvConfig {
   releasePrefix: string
   /** after a release lands in an environment, merge it back into every earlier environment */
   backMerge: boolean
+  /** issue-key prefixes to recognise (e.g. CYB4, CYB2); empty = taken from the tracker, else inferred */
+  issuePrefixes: string[]
+  /** branch prefixes that are never work items (release/sync/bot branches) */
+  excludePrefixes: string[]
 }
 
 export interface ReleaseBranchRef {
@@ -318,7 +322,15 @@ export interface ReleaseItem {
   commits: Commit[]
   lastActivity: string
   issue?: TrackerIssue
+  archived: boolean
+  /** manual corrections of inEnv (environment id -> true/false), when PakGit cannot see a merge */
+  overrides: Record<string, boolean>
 }
+
+export interface BranchTarget { name: string; existing: boolean }
+export interface PrepareOptions { push: boolean; openPr: boolean }
+/** a promotion that stopped on a conflict and can be continued once the merge is committed */
+export interface PendingPromotion { envId: string; branch: string; remaining: { id: string; ref: string | null; commits: string[] }[]; options: PrepareOptions }
 
 export interface ReleaseAnalysis {
   config: EnvConfig
@@ -352,6 +364,10 @@ export interface ReleaseApi {
   promote(repo: string, envId: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
   /** create a release branch cut from the environment's branch containing the given items, push it and open a pull request */
   startRelease(repo: string, envId: string, name: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
+  /** merge the items into one branch (new from the environment, or existing), optionally push and open the PR; stops at the first conflict */
+  prepareBranch(repo: string, envId: string, target: BranchTarget, items: { id: string; ref: string | null; commits: string[] }[], options: PrepareOptions): Promise<PromoteResult & { remaining?: { id: string; ref: string | null; commits: string[] }[] }>
+  setArchived(repo: string, ids: string[], archived: boolean): Promise<void>
+  setOverrides(repo: string, id: string, overrides: Record<string, boolean> | null): Promise<void>
   /** open one pull request per feature branch into the environment */
   openFeaturePRs(repo: string, envId: string, items: { id: string; ref: string | null; commits: string[] }[]): Promise<PromoteResult>
   /** compute the hosting provider's pull-request page for head → base (and open it in the browser) */

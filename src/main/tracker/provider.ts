@@ -16,6 +16,8 @@ export interface TrackerProvider {
   setState(key: string, stateName: string): Promise<void>
   /** normalise a key found in text to the canonical form, e.g. cyb4-12 -> CYB4-12 */
   normalizeKey(key: string): string
+  /** issue-key prefixes known to the tracker (Linear team keys); empty when unknown */
+  keyPrefixes(): Promise<string[]>
 }
 
 export class NoTracker implements TrackerProvider {
@@ -29,4 +31,5 @@ export class NoTracker implements TrackerProvider {
   async states(): Promise<string[]> { return [] }
   async setState(): Promise<void> { throw new Error('No issue tracker configured') }
   normalizeKey(key: string): string { return key.toUpperCase() }
+  async keyPrefixes(): Promise<string[]> { return [] }
 }

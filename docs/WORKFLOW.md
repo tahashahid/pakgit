@@ -97,6 +97,23 @@ without a pull request:
 Branch from `main`, PR into `main`, then **Sync environments** (PRs `main → stage`,
 `main → dev`). Never hotfix on `dev` or `stage` directly.
 
+### Promoting several items at once
+
+**Promote selected…** merges the ticked items into one branch: a new one cut from the
+target environment (default `release/<env>-<week>`) or an existing branch you pick.
+PakGit merges the items one by one. If one conflicts it stops on that branch; resolve the
+conflict in the Files panel, commit the merge, and use **Continue** in the banner to merge
+the remaining items, then push and open the pull request. **Open pull request…** opens a
+PR page from any branch into any environment.
+
+### When PakGit cannot see a merge
+
+If something is already on an environment but was merged in a way git cannot trace
+(squash merge, cherry-pick, a re-done branch), right-click the item ▸ **Fix tracking…**
+and tick the environments it is really on. The correction is remembered (marked with `*`)
+until you reset it. Items you no longer care about can be **archived**; the Archived tab
+lists them and lets you unarchive.
+
 ### Direct merges
 
 Each environment's promotion strategy is configurable (Release ▸ Configure…):
