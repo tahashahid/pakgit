@@ -20,6 +20,7 @@ export class Store {
   readonly api = window.pakgit
 
   readonly repos = signal<RepoEntry[]>([])
+  readonly groups = signal<string[]>([])
   readonly repo = signal<RepoEntry | null>(null)
   readonly status = signal<RepoStatus | null>(null)
   readonly refs = signal<Refs | null>(null)
@@ -78,8 +79,7 @@ export class Store {
 
     this.api.getSettings().then((s) => this.settings.set(s)).catch(() => undefined)
     this.api.gitVersion().then((v) => this.gitVersion.set(v)).catch(() => this.gitVersion.set('git not found'))
-    this.api.listRepos().then((list) => {
-      this.repos.set(list)
+    this.reloadRepos().then((list) => {
       const last = LS.get<string | null>('lastRepo', null)
       const entry = list.find((r) => r.path === last) ?? list[0] ?? null
       if (entry) this.openRepo(entry)
@@ -138,18 +138,24 @@ export class Store {
     LS.set('lastRepo', entry.path)
     void this.refresh()
   }
-  async addRepo(path?: string): Promise<void> {
+  /** Reload the repository list and groups from disk. */
+  async reloadRepos(): Promise<RepoEntry[]> {
+    const [list, groups] = await Promise.all([this.api.listRepos(), this.api.listGroups().catch(() => [])])
+    this.repos.set(list); this.groups.set(groups)
+    return list
+  }
+  async addRepo(path?: string, group?: string | null): Promise<void> {
     try {
       const entry = await this.api.addRepo(path)
       if (!entry) return
-      this.repos.set(await this.api.listRepos())
+      if (group) await this.api.setRepoGroup(entry.path, group)
+      await this.reloadRepos()
       this.openRepo(entry)
     } catch (e) { this.toast('error', e instanceof Error ? e.message : String(e)) }
   }
   async removeRepo(path: string): Promise<void> {
     await this.api.removeRepo(path)
-    const list = await this.api.listRepos()
-    this.repos.set(list)
+    const list = await this.reloadRepos()
     if (this.repo()?.path === path) { if (list[0]) this.openRepo(list[0]); else { this.repo.set(null); void this.refresh() } }
   }
 

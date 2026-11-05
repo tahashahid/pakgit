@@ -30,14 +30,6 @@ import { Icon } from '../ui/icon'
         <button class="btn" title="Open terminal" [disabled]="!store.repo()" (click)="a.terminal()"><pg-icon name="terminal" /></button>
       </div>
       <div class="spacer"></div>
-      @if (store.repo(); as repo) {
-        <span class="repo-name" [title]="repo.path">
-          <span>{{ repo.name }}</span>
-          @if (store.status(); as st) {
-            <span class="branch-pill"><pg-icon name="branch" [size]="12" />{{ st.detached ? 'detached HEAD' : (st.branch ?? '(no branch)') }}@if (st.upstream) { <span class="badge">→ {{ st.upstream }}</span> }</span>
-          }
-        </span>
-      }
       <div class="tool-group">
         <button class="btn small" [class.active]="store.perspective() === 'standard'" title="Standard window (Cmd/Ctrl+1)" (click)="store.perspective.set('standard')">Standard</button>
         <button class="btn small" [class.active]="store.perspective() === 'log'" title="Log window (Cmd/Ctrl+2)" (click)="store.perspective.set('log')">Log</button>

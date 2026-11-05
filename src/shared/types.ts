@@ -82,6 +82,8 @@ export interface RepoEntry {
   path: string
   name: string
   lastOpened: number
+  /** optional repository group (see listGroups) */
+  group?: string | null
 }
 
 export interface GitLogLine {
@@ -125,6 +127,11 @@ export interface SubmoduleInfo { path: string; sha: string; state: 'initialized'
 export interface WorktreeInfo { path: string; sha: string; branch: string | null; main: boolean }
 
 export interface PakGitApi {
+  listGroups(): Promise<string[]>
+  createGroup(name: string): Promise<string[]>
+  renameGroup(oldName: string, newName: string): Promise<void>
+  deleteGroup(name: string): Promise<void>
+  setRepoGroup(path: string, group: string | null): Promise<void>
   submodules(repo: string): Promise<SubmoduleInfo[]>
   submoduleUpdate(repo: string, paths?: string[]): Promise<void>
   worktrees(repo: string): Promise<WorktreeInfo[]>

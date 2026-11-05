@@ -16,10 +16,19 @@ function saveRepos(list: RepoEntry[]): void {
   mkdirSync(dirname(storeFile()), { recursive: true })
   writeFileSync(storeFile(), JSON.stringify(list, null, 2))
 }
+const groupsFile = () => join(app.getPath('userData'), 'groups.json')
+function loadGroups(): string[] {
+  try { return JSON.parse(readFileSync(groupsFile(), 'utf8')) } catch { return [] }
+}
+function saveGroups(list: string[]): void {
+  mkdirSync(dirname(groupsFile()), { recursive: true })
+  writeFileSync(groupsFile(), JSON.stringify(list, null, 2))
+}
 async function registerRepo(path: string): Promise<RepoEntry> {
   const top = await git.topLevel(path)
+  const existing = loadRepos().find((r) => r.path === top)
   const list = loadRepos().filter((r) => r.path !== top)
-  const entry: RepoEntry = { path: top, name: basename(top), lastOpened: Date.now() }
+  const entry: RepoEntry = { path: top, name: basename(top), lastOpened: Date.now(), group: existing?.group ?? null }
   list.unshift(entry)
   saveRepos(list)
   return entry
@@ -201,6 +210,28 @@ function registerIpc(): void {
     const entry = await registerRepo(path)
     await watchRepo(entry.path)
     return entry
+  })
+  handle('repos:groups', () => loadGroups())
+  handle('repos:createGroup', (name: string) => {
+    const n = name.trim()
+    if (!n) throw new Error('Group name is empty')
+    const list = loadGroups()
+    if (!list.includes(n)) { list.push(n); saveGroups(list) }
+    return list
+  })
+  handle('repos:renameGroup', (oldName: string, newName: string) => {
+    const n = newName.trim()
+    if (!n) throw new Error('Group name is empty')
+    saveGroups(loadGroups().map((g) => (g === oldName ? n : g)).filter((g, i, a) => a.indexOf(g) === i))
+    saveRepos(loadRepos().map((r) => (r.group === oldName ? { ...r, group: n } : r)))
+  })
+  handle('repos:deleteGroup', (name: string) => {
+    saveGroups(loadGroups().filter((g) => g !== name))
+    saveRepos(loadRepos().map((r) => (r.group === name ? { ...r, group: null } : r)))
+  })
+  handle('repos:setGroup', (path: string, group: string | null) => {
+    if (group && !loadGroups().includes(group)) saveGroups([...loadGroups(), group])
+    saveRepos(loadRepos().map((r) => (r.path === path ? { ...r, group } : r)))
   })
   handle('dialog:directory', async (title?: string) => {
     const r = await dialog.showOpenDialog({ title: title ?? 'Select Directory', properties: ['openDirectory', 'createDirectory'] })

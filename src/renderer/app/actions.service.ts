@@ -22,8 +22,26 @@ export class Actions {
     const local = () => (s.refs()?.branches ?? []).filter((b) => !b.remote).map((b) => b.name)
     const allRefs = () => [...(s.refs()?.branches ?? []).map((b) => b.fullName), ...(s.refs()?.tags ?? []).map((t) => t.name)]
     return {
-      // --- repositories ---
-      openRepo: () => s.addRepo(),
+      // --- repositories & groups ---
+      openRepo: (group?: string | null) => s.addRepo(undefined, group),
+      createGroup: async (): Promise<string | null> => {
+        const v = await prompt({ title: 'New Group', okLabel: 'Create', fields: [{ key: 'name', label: 'Group name', placeholder: 'e.g. Work' }] })
+        if (!v || !String(v.name).trim()) return null
+        const name = String(v.name).trim()
+        try { await api.createGroup(name); await s.reloadRepos(); return name } catch (e) { toast('error', String(e)); return null }
+      },
+      renameGroup: async (name: string) => {
+        const v = await prompt({ title: 'Rename Group', okLabel: 'Rename', fields: [{ key: 'name', label: 'New name', value: name }] })
+        if (!v || !String(v.name).trim() || v.name === name) return
+        try { await api.renameGroup(name, String(v.name).trim()); await s.reloadRepos() } catch (e) { toast('error', String(e)) }
+      },
+      deleteGroup: async (name: string) => {
+        if (!(await prompt({ title: 'Delete Group', danger: true, okLabel: 'Delete', message: `Delete group "${name}"? Its repositories stay in the list, ungrouped.` }))) return
+        try { await api.deleteGroup(name); await s.reloadRepos() } catch (e) { toast('error', String(e)) }
+      },
+      moveRepoToGroup: async (path: string, group: string | null) => {
+        try { await api.setRepoGroup(path, group); await s.reloadRepos() } catch (e) { toast('error', String(e)) }
+      },
       clone: async () => {
         const v = await prompt({ title: 'Clone Repository', okLabel: 'Clone', fields: [
           { key: 'url', label: 'Repository URL', placeholder: 'https://github.com/user/repo.git' },

@@ -1,4 +1,7 @@
-import { Component, computed, inject, signal } from '@angular/core'
+import { Component, ElementRef, computed, effect, inject, signal } from '@angular/core'
+import { NgTemplateOutlet } from '@angular/common'
+import { LS } from '../store.service'
+import { buildTree, ancestorsOf, type TreeNode } from '../../lib/tree'
 import { Store } from '../store.service'
 import { Actions } from '../actions.service'
 import { Icon } from '../ui/icon'
@@ -8,24 +11,55 @@ import type { BranchInfo, RemoteInfo, StashInfo, SubmoduleInfo, TagInfo, Worktre
 
 @Component({
   selector: 'pg-branches',
-  imports: [Icon, Panel],
+  imports: [Icon, Panel, NgTemplateOutlet],
   template: `
+    <!-- recursive folder tree for branches and tags -->
+    <ng-template #tree let-nodes let-depth="depth" let-kind="kind" let-remote="remote">
+      @for (n of nodes; track n.path) {
+        <li class="row folder" [style.paddingLeft.px]="8 + depth * 14" (click)="toggleFolder(kind, remote, n.path)" (contextmenu)="folderMenu($event, kind, remote, n)">
+          <span class="caret">{{ isOpen(kind, remote, n.path) ? '▾' : '▸' }}</span><pg-icon [name]="isOpen(kind, remote, n.path) ? 'folder-open' : 'folder'" [size]="13" /><span class="grow">{{ n.name }}/</span><span class="muted count-chip">{{ n.count }}</span>
+        </li>
+        @if (isOpen(kind, remote, n.path)) {
+          <ng-container *ngTemplateOutlet="tree; context: { $implicit: n.children, depth: depth + 1, kind, remote }" />
+          @for (leaf of itemsOf(nodes, n.path); track leaf.label) {
+            <ng-container *ngTemplateOutlet="leafTpl; context: { $implicit: leaf, depth: depth + 1, kind }" />
+          }
+        }
+      }
+    </ng-template>
+    <ng-template #leafTpl let-leaf let-depth="depth" let-kind="kind">
+      @if (kind === 'tag') {
+        <li class="row" [style.paddingLeft.px]="8 + depth * 14" (dblclick)="a.checkoutTag(leaf.item)" (contextmenu)="tagMenu($event, leaf.item)"><pg-icon name="tag" [size]="13" /><span class="grow">{{ leaf.label }}</span><span class="mono muted">{{ leaf.item.sha.slice(0, 7) }}</span></li>
+      } @else {
+        <li class="row" [style.paddingLeft.px]="8 + depth * 14" [class.selected]="leaf.item.current" [title]="leaf.item.fullName" (dblclick)="a.checkout(leaf.item)" (contextmenu)="branchMenu($event, leaf.item)">
+          <pg-icon name="branch" [size]="13" /><span class="grow" [style.fontWeight]="leaf.item.current ? 600 : 400">{{ leaf.label }}</span>
+          @if (leaf.item.upstream) { <span class="muted" style="font-size:11px">{{ leaf.item.ahead ? '↑' + leaf.item.ahead + ' ' : '' }}{{ leaf.item.behind ? '↓' + leaf.item.behind : '' }}</span> }
+        </li>
+      }
+    </ng-template>
+
     <pg-panel title="Branches">
       <ng-container actions>
         <button class="btn small" title="Add branch" (click)="a.addBranch()"><pg-icon name="plus" [size]="14" /></button>
         <button class="btn small" title="Fetch all" (click)="a.fetch()"><pg-icon name="fetch" [size]="14" /></button>
       </ng-container>
+      @if (store.status(); as st) {
+        <div class="current-branch" (click)="revealCurrent()" title="Current branch (click to reveal in the tree)" (contextmenu)="currentMenu($event)">
+          <pg-icon name="branch" [size]="14" />
+          <span class="grow">
+            <b>{{ st.detached ? 'detached HEAD' : (st.branch ?? '(no branch)') }}</b>
+            @if (st.upstream) { <span class="upstream">→ {{ st.upstream }}{{ st.ahead ? ' ↑' + st.ahead : '' }}{{ st.behind ? ' ↓' + st.behind : '' }}</span> }
+          </span>
+        </div>
+      }
       <input class="filter-input" placeholder="Filter branches, tags…" [value]="filter()" (input)="filter.set($any($event.target).value)" />
 
       <div class="group-header" (click)="toggle('local')"><span>{{ open('local') ? '▾' : '▸' }}</span>Local Branches<span class="count">{{ local().length }}</span></div>
       @if (open('local')) {
         <ul class="list">
-          @for (b of local(); track b.fullName) {
-            <li class="row" [class.selected]="b.current" (dblclick)="a.checkout(b)" (contextmenu)="branchMenu($event, b)">
-              <pg-icon name="branch" [size]="13" /><span class="grow" [style.fontWeight]="b.current ? 600 : 400">{{ b.name }}</span>
-              @if (b.upstream) { <span class="muted" style="font-size:11px">{{ b.ahead ? '↑' + b.ahead + ' ' : '' }}{{ b.behind ? '↓' + b.behind : '' }}</span> }
-            </li>
-          } @empty { <li class="row muted">—</li> }
+          <ng-container *ngTemplateOutlet="tree; context: { $implicit: localTree().children, depth: 0, kind: 'local', remote: '' }" />
+          @for (leaf of localTree().items; track leaf.label) { <ng-container *ngTemplateOutlet="leafTpl; context: { $implicit: leaf, depth: 0, kind: 'local' }" /> }
+          @if (!localTree().count) { <li class="row muted">—</li> }
         </ul>
       }
 
@@ -33,9 +67,8 @@ import type { BranchInfo, RemoteInfo, StashInfo, SubmoduleInfo, TagInfo, Worktre
         <div class="group-header" (click)="toggle('remote:' + r.name)"><span>{{ open('remote:' + r.name, remotes().length === 1) ? '▾' : '▸' }}</span>Remote: {{ r.name }}<span class="count">{{ remoteBranches(r.name).length }}</span></div>
         @if (open('remote:' + r.name, remotes().length === 1)) {
           <ul class="list">
-            @for (b of remoteBranches(r.name); track b.fullName) {
-              <li class="row" [title]="r.fetchUrl" (dblclick)="a.checkout(b)" (contextmenu)="branchMenu($event, b)"><span class="tree-indent"></span><pg-icon name="branch" [size]="13" /><span class="grow">{{ b.name }}</span></li>
-            }
+            <ng-container *ngTemplateOutlet="tree; context: { $implicit: remoteTree(r.name).children, depth: 1, kind: 'remote', remote: r.name }" />
+            @for (leaf of remoteTree(r.name).items; track leaf.label) { <ng-container *ngTemplateOutlet="leafTpl; context: { $implicit: leaf, depth: 1, kind: 'remote' }" /> }
             <li class="row muted" style="font-size:11px" (contextmenu)="remoteMenu($event, r)"><span class="tree-indent"></span>{{ r.fetchUrl }}</li>
           </ul>
         }
@@ -44,9 +77,8 @@ import type { BranchInfo, RemoteInfo, StashInfo, SubmoduleInfo, TagInfo, Worktre
       <div class="group-header" (click)="toggle('tags')"><span>{{ open('tags', tags().length <= 20) ? '▾' : '▸' }}</span>Tags<span class="count">{{ tags().length }}</span></div>
       @if (open('tags', tags().length <= 20)) {
         <ul class="list">
-          @for (t of tags(); track t.name) {
-            <li class="row" (dblclick)="a.checkoutTag(t)" (contextmenu)="tagMenu($event, t)"><pg-icon name="tag" [size]="13" /><span class="grow">{{ t.name }}</span><span class="mono muted">{{ t.sha.slice(0, 7) }}</span></li>
-          }
+          <ng-container *ngTemplateOutlet="tree; context: { $implicit: tagTree().children, depth: 0, kind: 'tag', remote: '' }" />
+          @for (leaf of tagTree().items; track leaf.label) { <ng-container *ngTemplateOutlet="leafTpl; context: { $implicit: leaf, depth: 0, kind: 'tag' }" /> }
         </ul>
       }
 
@@ -100,6 +132,60 @@ export class Branches {
   readonly tags = computed(() => (this.store.refs()?.tags ?? []).filter((t) => this.f(t.name)))
   readonly stashes = computed(() => this.store.refs()?.stashes ?? [])
   remoteBranches(remote: string): BranchInfo[] { return (this.store.refs()?.branches ?? []).filter((b) => b.remote === remote && this.f(b.name)) }
+
+  // --- folder trees (names grouped by "/" prefix) ---
+  readonly localTree = computed(() => buildTree(this.local(), (b) => b.name))
+  readonly tagTree = computed(() => buildTree(this.tags(), (t) => t.name))
+  private readonly remoteTrees = computed(() => { const m = new Map<string, TreeNode<BranchInfo>>(); for (const r of this.remotes()) m.set(r.name, buildTree(this.remoteBranches(r.name), (b) => b.name)); return m })
+  remoteTree(remote: string): TreeNode<BranchInfo> { return this.remoteTrees().get(remote) ?? buildTree([], () => '') }
+  /** expanded folder keys ("kind:remote:path"), persisted per repository */
+  private readonly expanded = signal<Set<string>>(new Set())
+  private key(kind: string, remote: string, path: string): string { return `${kind}:${remote}:${path}` }
+  isOpen(kind: string, remote: string, path: string): boolean {
+    if (this.filter()) return true // searching: show everything that matches
+    return this.expanded().has(this.key(kind, remote, path))
+  }
+  toggleFolder(kind: string, remote: string, path: string): void {
+    const k = this.key(kind, remote, path); const next = new Set(this.expanded())
+    next.has(k) ? next.delete(k) : next.add(k)
+    this.expanded.set(next)
+    const repo = this.store.repo(); if (repo) LS.set('branchTree:' + repo.path, [...next])
+  }
+  itemsOf(nodes: TreeNode<BranchInfo | TagInfo>[], path: string): { label: string; item: BranchInfo | TagInfo }[] { return nodes.find((n) => n.path === path)?.items ?? [] }
+  folderMenu(e: MouseEvent, kind: string, remote: string, n: TreeNode<BranchInfo | TagInfo>): void {
+    const open = this.isOpen(kind, remote, n.path)
+    const all = (node: TreeNode<BranchInfo | TagInfo>): string[] => [this.key(kind, remote, node.path), ...node.children.flatMap(all)]
+    this.cm.open(e, [
+      { label: open ? 'Collapse' : 'Expand', onClick: () => this.toggleFolder(kind, remote, n.path) },
+      { label: 'Expand all below', onClick: () => { const next = new Set(this.expanded()); for (const k of all(n)) next.add(k); this.expanded.set(next) } },
+      { label: 'Collapse all below', onClick: () => { const next = new Set(this.expanded()); for (const k of all(n)) next.delete(k); this.expanded.set(next) } },
+      { label: 'Copy prefix', onClick: () => this.a.copy(n.path + '/') }
+    ])
+  }
+  /** Expand the folders of the current branch and scroll it into view. */
+  revealCurrent(): void {
+    const cur = this.store.refs()?.branches.find((b) => b.current); if (!cur) return
+    this.filter.set('')
+    this.openState.update((o) => ({ ...o, local: true }))
+    const next = new Set(this.expanded()); for (const p of ancestorsOf(cur.name)) next.add(this.key('local', '', p)); this.expanded.set(next)
+    setTimeout(() => this.host.nativeElement.querySelector<HTMLElement>('.row.selected')?.scrollIntoView({ block: 'center' }), 50)
+  }
+  currentMenu(e: MouseEvent): void {
+    const cur = this.store.refs()?.branches.find((b) => b.current); if (!cur) return
+    this.branchMenu(e, cur)
+  }
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef)
+  constructor() {
+    // restore expansion per repository and always reveal the current branch's folders
+    effect(() => {
+      const repo = this.store.repo(); const refs = this.store.refs()
+      const saved = repo ? LS.get<string[]>('branchTree:' + repo.path, []) : []
+      const next = new Set(saved)
+      const cur = refs?.branches.find((b) => b.current)
+      if (cur) for (const p of ancestorsOf(cur.name)) next.add(this.key('local', '', p))
+      this.expanded.set(next)
+    })
+  }
   open(k: string, def = true): boolean { return this.openState()[k] ?? def }
   toggle(k: string): void { const cur = this.open(k, k.startsWith('remote:') ? this.remotes().length === 1 : k === 'tags' ? this.tags().length <= 20 : k === 'wt' ? this.store.worktrees().length > 1 : true); this.openState.update((s) => ({ ...s, [k]: !cur })) }
 

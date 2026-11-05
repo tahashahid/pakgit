@@ -25,7 +25,9 @@ const PATHS: Record<string, string> = {
   gear: 'M12 9a3 3 0 100 6 3 3 0 000-6zm7.4 3a7.4 7.4 0 00-.1-1.2l2-1.5-2-3.4-2.3.9a7.5 7.5 0 00-2-1.2L14.6 2H9.4L9 4.6a7.5 7.5 0 00-2 1.2l-2.3-.9-2 3.4 2 1.5a7.4 7.4 0 000 2.4l-2 1.5 2 3.4 2.3-.9a7.5 7.5 0 002 1.2l.4 2.6h5.2l.4-2.6a7.5 7.5 0 002-1.2l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z',
   submodule: 'M4 4h7v7H4zM13 13h7v7h-7zM11 7.5h2v5.5',
   worktree: 'M3 20h18M6 20V9l6-5 6 5v11M10 20v-6h4v6',
-  clone: 'M4 4h12v12H4zM8 8h12v12H8z'
+  clone: 'M4 4h12v12H4zM8 8h12v12H8z',
+  'folder-plus': 'M3 6h6l2 2h10v10H3zM12 10v6M9 13h6',
+  'folder-open': 'M3 7h6l2 2h10l-2 9H3zM3 7v11'
 }
 
 @Component({
