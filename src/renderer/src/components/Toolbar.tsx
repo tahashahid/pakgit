@@ -4,7 +4,7 @@ import { Btn, Icon } from './ui'
 import { useActions } from '@/lib/actions'
 
 export function Toolbar(): JSX.Element {
-  const { repo, status, busy, perspective, setPerspective, theme, toggleTheme, refresh } = useStore()
+  const { repo, status, busy, perspective, setPerspective, theme, toggleTheme, refresh, setShowSettings } = useStore()
   const a = useActions()
   const disabled = !repo || !!busy
   const mac = window.pakgitMenu.platform === 'darwin'
@@ -43,6 +43,7 @@ export function Toolbar(): JSX.Element {
         <Btn small active={perspective === 'worktree'} title="Working tree window (Cmd/Ctrl+3)" onClick={() => setPerspective('worktree')}>Working Tree</Btn>
       </div>
       <Btn small kind="ghost" title="Toggle theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></Btn>
+      <Btn small kind="ghost" title="Settings (Cmd/Ctrl+,)" onClick={() => setShowSettings(true)}><Icon name="gear" /></Btn>
     </div>
   )
 }

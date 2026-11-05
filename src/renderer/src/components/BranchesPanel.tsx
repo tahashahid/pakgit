@@ -15,7 +15,7 @@ function Group({ title, count, children, defaultOpen = true }: { title: string; 
 }
 
 export function BranchesPanel(): JSX.Element {
-  const { refs, status } = useStore()
+  const { refs, status, submodules, worktrees, selectedStash, selectStash } = useStore()
   const a = useActions()
   const [menu, openMenu] = useContextMenu()
   const [filter, setFilter] = useState('')
@@ -32,7 +32,11 @@ export function BranchesPanel(): JSX.Element {
     { label: 'Rebase current onto', onClick: () => void a.rebase(b.fullName), disabled: b.current },
     { label: 'Add Branch from here…', onClick: () => void a.addBranch(b.fullName) },
     { separator: true, label: '' },
-    ...(b.remote ? [] : [{ label: 'Rename…', onClick: () => void a.renameBranch(b) }]),
+    ...(b.remote ? [] : [
+      { label: 'Push…', onClick: () => void a.pushBranch(b) },
+      { label: 'Track Remote Branch…', onClick: () => void a.setUpstream(b) },
+      { label: 'Rename…', onClick: () => void a.renameBranch(b) }
+    ]),
     { label: 'Copy name', onClick: () => a.copy(b.fullName) },
     { separator: true, label: '' },
     { label: 'Delete…', danger: true, onClick: () => void a.deleteBranch(b), disabled: b.current }
@@ -77,13 +81,34 @@ export function BranchesPanel(): JSX.Element {
       </Group>
       <Group title="Stashes" count={stashes.length}>
         {stashes.map((st) => (
-          <li key={st.ref} className="row" onDoubleClick={() => void a.stashApply(st, false)} onContextMenu={(e) => openMenu(e, [
+          <li key={st.ref} className={`row ${selectedStash?.ref === st.ref ? 'selected' : ''}`} onClick={() => selectStash(st)} onDoubleClick={() => void a.stashApply(st, false)} onContextMenu={(e) => openMenu(e, [
             { label: 'Apply Stash', onClick: () => void a.stashApply(st, false) },
             { label: 'Apply & Drop (pop)', onClick: () => void a.stashApply(st, true) },
             { label: 'Drop…', danger: true, onClick: () => void a.stashDrop(st) }
           ])}><Icon name="stash" size={13} /><span className="grow">{st.message}</span><span className="muted">{st.ref}</span></li>
         ))}
         {stashes.length === 0 && <li className="row muted">No stash available</li>}
+      </Group>
+      {submodules.length > 0 && (
+        <Group title="Submodules" count={submodules.length}>
+          {submodules.map((sm) => (
+            <li key={sm.path} className="row" title={`${sm.sha} ${sm.ref}`} onDoubleClick={() => sm.state !== 'uninitialized' && a.openPath(sm.path)} onContextMenu={(e) => openMenu(e, [
+              { label: 'Open Submodule', onClick: () => a.openPath(sm.path), disabled: sm.state === 'uninitialized' },
+              { label: sm.state === 'uninitialized' ? 'Initialize' : 'Update', onClick: () => void a.submoduleUpdate([sm.path]) },
+              { label: 'Update all submodules', onClick: () => void a.submoduleUpdate() }
+            ])}><Icon name="submodule" size={13} /><span className="grow">{sm.path}</span><span className="sub-state">{sm.state}</span></li>
+          ))}
+        </Group>
+      )}
+      <Group title="Worktrees" count={worktrees.length} defaultOpen={worktrees.length > 1}>
+        {worktrees.map((wt) => (
+          <li key={wt.path} className="row" title={wt.path} onDoubleClick={() => !wt.main && a.openPath(wt.path)} onContextMenu={(e) => openMenu(e, [
+            { label: 'Open Worktree', onClick: () => a.openPath(wt.path), disabled: wt.main },
+            { label: 'Copy path', onClick: () => a.copy(wt.path) },
+            { label: 'Remove…', danger: true, onClick: () => void a.worktreeRemove(wt.path), disabled: wt.main }
+          ])}><Icon name="worktree" size={13} /><span className="grow">{wt.branch ?? wt.sha.slice(0, 7)}</span><span className="muted" style={{ fontSize: 11 }}>{wt.main ? 'main' : wt.path.split('/').pop()}</span></li>
+        ))}
+        <li className="row muted" style={{ cursor: 'pointer' }} onClick={() => void a.worktreeAdd()}>+ Add worktree…</li>
       </Group>
       {status?.state && status.state !== 'clean' && <div className="group-header">State: {status.state}</div>}
     </Panel>

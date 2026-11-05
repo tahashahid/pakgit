@@ -111,7 +111,43 @@ export interface CommitOptions {
   push?: boolean
 }
 
+export interface RebaseTodoEntry { action: 'pick' | 'squash' | 'fixup' | 'drop' | 'reword'; sha: string; subject: string }
+export interface BlameLine { sha: string; author: string; date: string; line: number; text: string; summary: string }
+export interface Settings {
+  gitPath: string
+  pullMode: 'merge' | 'rebase' | 'ff-only'
+  autoFetchMinutes: number
+  logLimit: number
+  confirmDiscard: boolean
+}
+
+export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
+export interface WorktreeInfo { path: string; sha: string; branch: string | null; main: boolean }
+
 export interface PakGitApi {
+  submodules(repo: string): Promise<SubmoduleInfo[]>
+  submoduleUpdate(repo: string, paths?: string[]): Promise<void>
+  worktrees(repo: string): Promise<WorktreeInfo[]>
+  worktreeAdd(repo: string, path: string, branch: string, create: boolean): Promise<void>
+  worktreeRemove(repo: string, path: string, force?: boolean): Promise<void>
+  formatPatch(repo: string, sha: string, dest: string): Promise<void>
+  applyPatchFile(repo: string, file: string): Promise<void>
+  clean(repo: string, includeIgnored: boolean): Promise<void>
+  trash(repo: string, paths: string[]): Promise<void>
+  saveFileDialog(title: string, defaultName: string): Promise<string | null>
+  openFileDialog(title: string): Promise<string | null>
+  getSettings(): Promise<Settings>
+  saveSettings(s: Settings): Promise<Settings>
+  applyPatch(repo: string, patch: string, opts: { cached: boolean; reverse?: boolean }): Promise<void>
+  resolveConflict(repo: string, path: string, side: 'ours' | 'theirs'): Promise<void>
+  markResolved(repo: string, paths: string[]): Promise<void>
+  conflictFile(repo: string, path: string): Promise<string>
+  rebaseInteractive(repo: string, base: string, todo: RebaseTodoEntry[], rewords?: Record<string, string>): Promise<void>
+  blameStructured(repo: string, path: string, rev?: string): Promise<BlameLine[]>
+  stashShow(repo: string, index: number): Promise<string>
+  setUpstream(repo: string, branch: string, upstream: string): Promise<void>
+  emptyCommit(repo: string, message: string): Promise<void>
+
   listRepos(): Promise<RepoEntry[]>
   addRepo(path?: string): Promise<RepoEntry | null>
   removeRepo(path: string): Promise<void>
@@ -121,7 +157,7 @@ export interface PakGitApi {
 
   status(repo: string): Promise<RepoStatus>
   refs(repo: string): Promise<Refs>
-  log(repo: string, opts?: { limit?: number; all?: boolean; skip?: number; path?: string }): Promise<Commit[]>
+  log(repo: string, opts?: { limit?: number; all?: boolean; skip?: number; path?: string; follow?: boolean }): Promise<Commit[]>
   commitDetails(repo: string, sha: string): Promise<CommitDetails>
   commitFileDiff(repo: string, sha: string, path: string): Promise<string>
   diff(req: DiffRequest): Promise<string>

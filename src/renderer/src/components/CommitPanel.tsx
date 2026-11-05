@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { useStore } from '@/lib/store'
+import { LS, useStore } from '@/lib/store'
 import { Btn, Icon, Panel } from './ui'
 import { useActions } from '@/lib/actions'
 
@@ -12,6 +12,8 @@ export function CommitPanel(): JSX.Element {
   const [all, setAll] = useState(false)
   const [noVerify, setNoVerify] = useState(false)
   const [signoff, setSignoff] = useState(false)
+  const [showRecent, setShowRecent] = useState(false)
+  const [recent, setRecent] = useState<string[]>(() => LS.get<string[]>('recentMessages', []))
   useEffect(() => { setSubject(''); setBody(''); setAmend(false) }, [repo])
   useEffect(() => {
     if (amend && commits[0] && !subject) { setSubject(commits[0].subject); setBody(commits[0].body) }
@@ -23,7 +25,11 @@ export function CommitPanel(): JSX.Element {
     if (!repo) return
     const message = body.trim() ? `${subject.trim()}\n\n${body.trim()}` : subject.trim()
     const r = await run(push ? 'Commit & Push' : 'Commit', () => api.commit(repo.path, { message, amend, all, noVerify, signoff, push }), { success: push ? 'Committed and pushed' : 'Committed' })
-    if (r !== undefined) { setSubject(''); setBody(''); setAmend(false) }
+    if (r !== undefined) {
+      const next = [message, ...recent.filter((m) => m !== message)].slice(0, 15)
+      setRecent(next); LS.set('recentMessages', next)
+      setSubject(''); setBody(''); setAmend(false)
+    }
   }
   const inState = status && status.state !== 'clean'
   return (
@@ -43,8 +49,16 @@ export function CommitPanel(): JSX.Element {
         </div>
       )}
       <div className="commit-form" style={inState ? { height: 'calc(100% - 34px)' } : undefined}>
-        <input className="subject" placeholder="Commit message (subject)" value={subject} onChange={(e) => setSubject(e.target.value)}
-          onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && canCommit) void doCommit(false) }} />
+        <div className="subject-wrap">
+          <input className="subject" placeholder="Commit message (subject)" value={subject} onChange={(e) => setSubject(e.target.value)}
+            onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && canCommit) void doCommit(false); if (e.key === 'Escape') setShowRecent(false) }} />
+          {recent.length > 0 && <Btn small kind="ghost" title="Recent commit messages" onClick={() => setShowRecent(!showRecent)}>▾</Btn>}
+          {showRecent && (
+            <ul className="list recent-msgs" onMouseLeave={() => setShowRecent(false)}>
+              {recent.map((m) => <li key={m} className="row" onClick={() => { const [sub, ...rest] = m.split('\n'); setSubject(sub); setBody(rest.join('\n').trim()); setShowRecent(false) }}>{m.split('\n')[0]}</li>)}
+            </ul>
+          )}
+        </div>
         <textarea placeholder="Description (optional)" value={body} onChange={(e) => setBody(e.target.value)}
           onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && canCommit) void doCommit(false) }} />
         <div className="commit-footer">

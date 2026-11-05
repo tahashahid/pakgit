@@ -16,7 +16,7 @@ function RefPills({ refs }: { refs: string[] }): JSX.Element | null {
 }
 
 export function LogPanel(): JSX.Element {
-  const { commits, selectedCommit, selectCommit, status } = useStore()
+  const { commits, selectedCommit, selectCommit, status, logAll, setLogAll, logPath, setLogPath, loadMore, logLimit, settings } = useStore()
   const a = useActions()
   const [menu, openMenu] = useContextMenu()
   const [filter, setFilter] = useState('')
@@ -27,6 +27,7 @@ export function LogPanel(): JSX.Element {
   const headSha = commits.find((c) => c.refs.includes('HEAD'))?.sha
   const menuFor = (e: React.MouseEvent, c: Commit) => openMenu(e, [
     { label: 'Check Out Commit…', onClick: () => void a.checkoutCommit(c) },
+    { label: 'Rebase Interactive from here…', onClick: () => void a.rebaseInteractive(c) },
     { label: 'Add Branch from here…', onClick: () => void a.addBranch(c.sha) },
     { label: 'Add Tag…', onClick: () => void a.addTag(c) },
     { separator: true, label: '' },
@@ -36,13 +37,19 @@ export function LogPanel(): JSX.Element {
     { label: 'Rebase current onto…', onClick: () => void a.rebase(c.sha) },
     { label: `Reset ${status?.branch ?? 'HEAD'} to here…`, danger: true, onClick: () => void a.reset(c) },
     { separator: true, label: '' },
+    { label: 'Create Patch…', onClick: () => void a.createPatch(c) },
     { label: 'Copy SHA', onClick: () => a.copy(c.sha) },
     { label: 'Copy subject', onClick: () => a.copy(c.subject) }
   ])
   return (
-    <Panel title="Log" actions={<Btn small title="Fetch" onClick={() => void a.fetch()}><Icon name="fetch" size={14} /></Btn>}>
+    <Panel title={logPath ? 'File Log' : 'Log'} actions={<>
+      <Btn small active={!logAll} title="Show only the current branch" onClick={() => setLogAll(false)} disabled={!!logPath}>Current</Btn>
+      <Btn small active={logAll} title="Show all branches" onClick={() => setLogAll(true)} disabled={!!logPath}>All</Btn>
+      <Btn small title="Fetch" onClick={() => void a.fetch()}><Icon name="fetch" size={14} /></Btn>
+    </>}>
       {menu}
       <input className="filter-input" placeholder="Filter commits (subject, author, sha)…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+      {logPath && <div className="log-chip"><Icon name="file" size={12} />History of {logPath} (follows renames)<button title="Back to full log" onClick={() => setLogPath(null)}>✕</button></div>}
       {commits.length === 0 && <div className="empty">No commits yet.</div>}
       <div className="log">
         <table>
@@ -71,6 +78,7 @@ export function LogPanel(): JSX.Element {
             ))}
           </tbody>
         </table>
+        {commits.length >= (logLimit || settings?.logLimit || 400) && <div className="load-more"><Btn small onClick={loadMore}>Load more commits…</Btn></div>}
       </div>
     </Panel>
   )
@@ -79,8 +87,10 @@ export function LogPanel(): JSX.Element {
 export function CommitDetailsPanel(): JSX.Element {
   const { selectedCommit: c, selectedCommitFile, selectCommitFile } = useStore()
   const a = useActions()
+  const [menu, openMenu] = useContextMenu()
   return (
     <Panel title="Commit Details">
+      {menu}
       {!c ? <div className="empty">Select a commit.</div> : (
         <div className="commit-details">
           <h3>{c.subject}</h3>
@@ -94,7 +104,12 @@ export function CommitDetailsPanel(): JSX.Element {
           <div className="group-header">Files<span className="count">{c.files.length}</span></div>
           <ul className="list">
             {c.files.map((f) => (
-              <li key={f.path} className={`row ${selectedCommitFile === f.path ? 'selected' : ''}`} onClick={() => void selectCommitFile(f.path)}>
+              <li key={f.path} className={`row ${selectedCommitFile === f.path ? 'selected' : ''}`} onClick={() => void selectCommitFile(f.path)}
+                onContextMenu={(e) => openMenu(e, [
+                  { label: 'Show File Log', onClick: () => a.fileLog(f) },
+                  { label: 'Blame at this revision', onClick: () => void a.blame(f, c.sha) },
+                  { label: 'Copy path', onClick: () => a.copy(f.path) }
+                ])}>
                 <span className={`status-chip st-${f.status}`}>{f.status}</span>
                 <span className="grow">{f.path}</span>
                 <span className="muted" style={{ fontSize: 11 }}><span style={{ color: 'var(--add-fg)' }}>+{f.additions}</span> <span style={{ color: 'var(--del-fg)' }}>−{f.deletions}</span></span>

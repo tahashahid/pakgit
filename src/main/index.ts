@@ -25,6 +25,22 @@ async function registerRepo(path: string): Promise<RepoEntry> {
   return entry
 }
 
+// ---------- settings ----------
+
+import type { Settings } from '@shared/types'
+const settingsFile = () => join(app.getPath('userData'), 'settings.json')
+const defaultSettings: Settings = { gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true }
+function loadSettings(): Settings {
+  try { return { ...defaultSettings, ...JSON.parse(readFileSync(settingsFile(), 'utf8')) } } catch { return { ...defaultSettings } }
+}
+function saveSettings(s: Settings): Settings {
+  mkdirSync(dirname(settingsFile()), { recursive: true })
+  const merged = { ...defaultSettings, ...s }
+  writeFileSync(settingsFile(), JSON.stringify(merged, null, 2))
+  git.setGitExecutable(merged.gitPath)
+  return merged
+}
+
 // ---------- file watching ----------
 
 const watchers = new Map<string, FSWatcher>()
@@ -76,8 +92,9 @@ function createWindow(): BrowserWindow {
     }, Number(process.env.PAKGIT_SCREENSHOT_DELAY ?? 4000)))
   }
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' } })
-  if (process.env['ELECTRON_RENDERER_URL']) win.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  else win.loadFile(join(__dirname, '../renderer/index.html'))
+  const query = process.env.PAKGIT_SCREENSHOT_SELECT ? { select: process.env.PAKGIT_SCREENSHOT_SELECT } : undefined
+  if (process.env['ELECTRON_RENDERER_URL']) win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (query ? `?select=${encodeURIComponent(query.select)}` : ''))
+  else win.loadFile(join(__dirname, '../renderer/index.html'), { query })
   return win
 }
 
@@ -92,6 +109,9 @@ function buildMenu(): void {
         { label: 'Open Repository…', accelerator: 'CmdOrCtrl+O', click: send('repo:open') },
         { label: 'Clone…', accelerator: 'CmdOrCtrl+Shift+O', click: send('repo:clone') },
         { label: 'Initialize…', click: send('repo:init') },
+        { type: 'separator' },
+        { label: 'Apply Patch…', click: send('repo:apply-patch') },
+        { label: 'Clean Working Tree…', click: send('repo:clean') },
         { type: 'separator' },
         { label: 'Refresh', accelerator: 'F5', click: send('repo:refresh') },
         { label: 'Open in Terminal', accelerator: 'CmdOrCtrl+Alt+T', click: send('repo:terminal') },
@@ -112,7 +132,9 @@ function buildMenu(): void {
       submenu: [
         { label: 'Commit…', accelerator: 'CmdOrCtrl+K', click: send('local:commit') },
         { label: 'Stage All', accelerator: 'CmdOrCtrl+Shift+A', click: send('local:stage-all') },
-        { label: 'Stash…', accelerator: 'CmdOrCtrl+Shift+S', click: send('local:stash') }
+        { label: 'Stash…', accelerator: 'CmdOrCtrl+Shift+S', click: send('local:stash') },
+        { type: 'separator' },
+        { label: 'Create Empty Commit…', click: send('local:empty-commit') }
       ]
     },
     { role: 'editMenu' },
@@ -124,6 +146,7 @@ function buildMenu(): void {
         { label: 'Working Tree Window', accelerator: 'CmdOrCtrl+3', click: send('view:worktree') },
         { type: 'separator' },
         { label: 'Toggle Theme', click: send('view:theme') },
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: send('view:settings') },
         { type: 'separator' },
         { role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' },
         { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }
@@ -181,7 +204,7 @@ function registerIpc(): void {
 
   handle('git:status', async (repo: string) => { await watchRepo(repo); return git.status(repo) })
   handle('git:refs', (repo: string) => git.refs(repo))
-  handle('git:log', (repo: string, opts?: { limit?: number; all?: boolean; skip?: number; path?: string }) => git.log(repo, opts))
+  handle('git:log', (repo: string, opts?: { limit?: number; all?: boolean; skip?: number; path?: string; follow?: boolean }) => git.log(repo, opts))
   handle('git:commitDetails', (repo: string, sha: string) => git.commitDetails(repo, sha))
   handle('git:commitFileDiff', (repo: string, sha: string, path: string) => git.commitFileDiff(repo, sha, path))
   handle('git:diff', (req: DiffRequest) => git.diff(req.repo, req.path, req.area, req.oldPath))
@@ -222,6 +245,34 @@ function registerIpc(): void {
   handle('git:addRemote', (repo: string, n: string, u: string) => git.addRemote(repo, n, u))
   handle('git:removeRemote', (repo: string, n: string) => git.removeRemote(repo, n))
   handle('git:version', () => git.version())
+  handle('git:submodules', (repo: string) => git.submodules(repo))
+  handle('git:submoduleUpdate', (repo: string, paths?: string[]) => git.submoduleUpdate(repo, paths))
+  handle('git:worktrees', (repo: string) => git.worktrees(repo))
+  handle('git:worktreeAdd', (repo: string, p: string, b: string, c: boolean) => git.worktreeAdd(repo, p, b, c))
+  handle('git:worktreeRemove', (repo: string, p: string, f?: boolean) => git.worktreeRemove(repo, p, f))
+  handle('git:formatPatch', (repo: string, sha: string, dest: string) => git.formatPatch(repo, sha, dest))
+  handle('git:applyPatchFile', (repo: string, f: string) => git.applyPatchFile(repo, f))
+  handle('git:clean', (repo: string, x: boolean) => git.clean(repo, x))
+  handle('os:trash', async (repo: string, paths: string[]) => { for (const p of paths) await shell.trashItem(join(repo, p)) })
+  handle('dialog:saveFile', async (title: string, defaultName: string) => {
+    const r = await dialog.showSaveDialog({ title, defaultPath: defaultName })
+    return r.canceled ? null : r.filePath ?? null
+  })
+  handle('dialog:openFile', async (title: string) => {
+    const r = await dialog.showOpenDialog({ title, properties: ['openFile'] })
+    return r.canceled ? null : r.filePaths[0] ?? null
+  })
+  handle('settings:get', () => loadSettings())
+  handle('settings:save', (s: Settings) => saveSettings(s))
+  handle('git:applyPatch', (repo: string, patch: string, o: { cached: boolean; reverse?: boolean }) => git.applyPatch(repo, patch, o))
+  handle('git:resolveConflict', (repo: string, path: string, side: 'ours' | 'theirs') => git.resolveConflict(repo, path, side))
+  handle('git:markResolved', (repo: string, paths: string[]) => git.markResolved(repo, paths))
+  handle('git:conflictFile', (repo: string, path: string) => git.conflictFile(repo, path))
+  handle('git:rebaseInteractive', (repo: string, base: string, todo: git.RebaseTodoEntry[], rewords?: Record<string, string>) => git.rebaseInteractive(repo, base, todo, rewords))
+  handle('git:blameStructured', (repo: string, path: string, rev?: string) => git.blameStructured(repo, path, rev))
+  handle('git:stashShow', (repo: string, i: number) => git.stashShow(repo, i))
+  handle('git:setUpstream', (repo: string, b: string, u: string) => git.setUpstream(repo, b, u))
+  handle('git:emptyCommit', (repo: string, m: string) => git.emptyCommit(repo, m))
   handle('git:logHistory', () => git.getLogHistory())
 
   handle('os:terminal', (repo: string) => {
@@ -239,6 +290,7 @@ function registerIpc(): void {
 
 app.whenReady().then(() => {
   git.setLogSink((line) => broadcast('git:log', line))
+  git.setGitExecutable(loadSettings().gitPath)
   registerIpc()
   buildMenu()
   createWindow()

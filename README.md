@@ -7,20 +7,27 @@ credential helpers, LFS, hooks, submodules).
 
 See [ANALYSIS.md](ANALYSIS.md) for the SmartGit feature analysis this design is based on.
 
-## Features (v0.1)
+## Features (v0.2)
 
 - **Repositories** panel: open, clone, initialize; persisted list; open in terminal / file manager
-- **Branches** panel: local branches, remotes, tags, stashes; checkout (incl. tracking remote
-  branches), add / rename / delete branch, merge, rebase, add / delete tag, apply / pop / drop stash
+- **Branches** panel: local branches, remotes, tags, stashes, submodules, worktrees; checkout (incl.
+  tracking remote branches), add / rename / delete / push branch, track remote branch, merge, rebase,
+  add / delete tag, apply / pop / drop stash, init / update submodules, add / remove worktrees
 - **Files** panel: staged, unstaged, untracked and conflicted groups; stage / unstage (checkbox,
-  double-click, context menu), discard, ignore, multi-select, filter
-- **Changes** panel: unified diff with line numbers, add/delete colouring, whitespace toggle
-- **Commit** panel: subject + body, amend, commit all, no-verify, sign-off, Commit & Push,
-  undo last commit; merge / rebase continue, skip and abort banners
-- **Log** panel: commit graph with lanes, refs as pills, filter; context menu with checkout,
-  branch/tag from commit, cherry-pick, revert, merge, rebase, reset (soft / mixed / hard)
+  double-click, context menu), discard, move to trash, ignore, file log, blame, multi-select, filter
+- **Changes** panel: unified or side-by-side diff with line numbers, whitespace toggle, **stage / unstage
+  individual hunks**, conflict view (Take Ours / Take Theirs / Edit / Mark Resolved), blame view, stash preview
+- **Commit** panel: subject + body, recent messages, amend, commit all, no-verify, sign-off,
+  Commit & Push, undo last commit, empty commit; merge / rebase continue, skip and abort banners
+- **Log** panel: commit graph with lanes, refs as pills, filter, all-branches / current-branch toggle,
+  load more, per-file history (follows renames); context menu with checkout, branch/tag from commit,
+  cherry-pick, revert, merge, rebase, **interactive rebase** (reorder, reword, squash, fixup, drop),
+  reset (soft / mixed / hard), create patch
 - **Commit Details** panel: metadata, message, changed files with +/- counts, per-file diff
 - **Output** panel: every git command with timing, exit code and stderr
+- Repository menu: apply patch, clean working tree
+- **Settings**: git executable, default pull strategy, background fetch interval, log size,
+  discard confirmation, theme
 - Three perspectives (Standard, Log, Working Tree), light and dark theme, resizable panes with
   persisted sizes, automatic refresh on working-tree changes (chokidar)
 
@@ -60,8 +67,7 @@ src/shared/    types shared between processes
 ## Roadmap
 
 - Hosting providers (GitHub / GitLab / Bitbucket / Azure DevOps): pull requests, reviews
-- Three-way conflict solver and built-in file compare
-- Interactive rebase editor (reorder, squash, reword, split)
-- Git-Flow commands, worktrees, submodule management, bisect
-- Blame perspective, file log
+- Three-way merge editor (today: take ours / theirs, or edit externally and mark resolved)
+- Split commit in interactive rebase; rebase across merge commits
+- Git-Flow commands, bisect, LFS
 - Bundled git for platforms without one

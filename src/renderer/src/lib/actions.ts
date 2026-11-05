@@ -44,7 +44,7 @@ export function useActions() {
       fetch: (remote?: string) => run('Fetch', () => api.fetch(need(), remote, true), { success: 'Fetched' }),
       pull: async () => {
         const v = await prompt({ title: 'Pull', okLabel: 'Pull', message: `Pull ${s.status?.upstream ?? 'upstream'} into ${s.status?.branch ?? 'HEAD'}`, fields: [
-          { key: 'mode', label: 'Strategy', type: 'select', options: ['merge', 'rebase', 'ff-only'] }
+          { key: 'mode', label: 'Strategy', type: 'select', options: [s.settings?.pullMode ?? 'merge', ...(['merge', 'rebase', 'ff-only'] as const).filter((m) => m !== (s.settings?.pullMode ?? 'merge'))] }
         ] })
         if (!v) return
         await run('Pull', () => api.pull(need(), v.mode as 'merge'), { success: 'Pull finished' })
@@ -77,10 +77,88 @@ export function useActions() {
       stageAll: () => run('Stage all', () => api.stage(need(), ['.'])),
       unstageAll: () => run('Unstage all', () => api.unstage(need(), ['.'])),
       discard: async (files: FileEntry[]) => {
-        const v = await prompt({ title: 'Discard Changes', danger: true, okLabel: 'Discard', message: `Discard local changes of ${files.length === 1 ? files[0].path : files.length + ' files'}?\nUntracked files will be deleted. This cannot be undone.` })
-        if (!v) return
+        if (s.settings?.confirmDiscard !== false) {
+          const v = await prompt({ title: 'Discard Changes', danger: true, okLabel: 'Discard', message: `Discard local changes of ${files.length === 1 ? files[0].path : files.length + ' files'}?\nUntracked files will be deleted. This cannot be undone.` })
+          if (!v) return
+        }
         await run('Discard', () => api.discard(need(), files.map((f) => ({ path: f.path, area: f.area }))))
       },
+      trash: async (files: FileEntry[]) => {
+        const v = await prompt({ title: 'Move to Trash', okLabel: 'Move to Trash', message: `Move ${files.length === 1 ? files[0].path : files.length + ' untracked files'} to the system trash?` })
+        if (!v) return
+        await run('Move to trash', () => api.trash(need(), files.map((f) => f.path)))
+      },
+      clean: async () => {
+        const v = await prompt({ title: 'Clean Working Tree', danger: true, okLabel: 'Delete', message: 'Delete all untracked files and directories? This cannot be undone.', fields: [{ key: 'x', label: 'Also delete ignored files (-x)', type: 'checkbox' }] })
+        if (!v) return
+        await run('Clean', () => api.clean(need(), !!v.x), { success: 'Working tree cleaned' })
+      },
+      resolve: (file: FileEntry, side: 'ours' | 'theirs') => run(`Take ${side}`, () => api.resolveConflict(need(), file.path, side)),
+      markResolved: (files: FileEntry[]) => run('Mark resolved', () => api.markResolved(need(), files.map((f) => f.path))),
+      fileLog: (file: { path: string }) => { s.setLogPath(file.path); if (s.perspective === 'worktree') s.setPerspective('standard') },
+      blame: (file: { path: string }, rev?: string) => s.showBlame(file.path, rev),
+      createPatch: async (c: Commit) => {
+        const safe = c.subject.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50)
+        const dest = await api.saveFileDialog('Create Patch', `0001-${safe || c.shortSha}.patch`)
+        if (!dest) return
+        await run('Create patch', () => api.formatPatch(need(), c.sha, dest), { success: `Patch written to ${dest}` })
+      },
+      applyPatch: async () => {
+        const file = await api.openFileDialog('Apply Patch')
+        if (!file) return
+        await run('Apply patch', () => api.applyPatchFile(need(), file), { success: 'Patch applied' })
+      },
+      emptyCommit: async () => {
+        const v = await prompt({ title: 'Create Empty Commit', okLabel: 'Commit', fields: [{ key: 'message', label: 'Message', type: 'textarea' }] })
+        if (!v || !v.message) return
+        await run('Empty commit', () => api.emptyCommit(need(), String(v.message)))
+      },
+      rebaseInteractive: async (from: Commit) => {
+        const r = need()
+        const list = await api.log(r, { all: false, limit: 1000 })
+        const idx = list.findIndex((c) => c.sha === from.sha)
+        if (idx === -1) { toast('error', 'Commit is not on the current branch'); return }
+        const chain = list.slice(0, idx + 1).reverse()
+        if (chain.some((c) => c.parents.length > 1)) { toast('error', 'Interactive rebase over merge commits is not supported here'); return }
+        const base = from.parents[0] ?? '--root'
+        s.setRebase({ base, todo: chain.map((c) => ({ action: 'pick', sha: c.sha, subject: c.subject })) })
+      },
+      pushBranch: async (b: BranchInfo) => {
+        const remotes = (s.refs?.remotes ?? []).map((r) => r.name)
+        if (!remotes.length) { toast('error', 'No remote configured.'); return }
+        const v = await prompt({ title: `Push ${b.name}`, okLabel: 'Push', fields: [
+          { key: 'remote', label: 'Remote', type: 'select', options: remotes },
+          { key: 'setUpstream', label: 'Set as upstream', type: 'checkbox', value: String(!b.upstream) },
+          { key: 'force', label: 'Force push (--force-with-lease)', type: 'checkbox' }
+        ] })
+        if (!v) return
+        await run('Push', () => api.push(need(), { remote: String(v.remote), branch: b.name, setUpstream: !!v.setUpstream, force: !!v.force }), { success: `Pushed ${b.name}` })
+      },
+      setUpstream: async (b: BranchInfo) => {
+        const options = (s.refs?.branches ?? []).filter((x) => x.remote).map((x) => x.fullName)
+        if (!options.length) { toast('error', 'No remote branches. Fetch first.'); return }
+        const guess = options.find((o) => o.endsWith('/' + b.name))
+        const v = await prompt({ title: `Track Remote Branch for ${b.name}`, okLabel: 'Set', fields: [{ key: 'u', label: 'Upstream', type: 'select', options: guess ? [guess, ...options.filter((o) => o !== guess)] : options }] })
+        if (!v) return
+        await run('Set upstream', () => api.setUpstream(need(), b.name, String(v.u)))
+      },
+      submoduleUpdate: (paths?: string[]) => run('Update submodules', () => api.submoduleUpdate(need(), paths), { success: 'Submodules updated' }),
+      worktreeAdd: async () => {
+        const dir = await api.pickDirectory('Choose directory for the new worktree')
+        if (!dir) return
+        const v = await prompt({ title: 'Add Worktree', okLabel: 'Add', message: dir, fields: [
+          { key: 'branch', label: 'Branch' },
+          { key: 'create', label: 'Create new branch', type: 'checkbox', value: 'true' }
+        ] })
+        if (!v || !v.branch) return
+        await run('Add worktree', () => api.worktreeAdd(need(), dir, String(v.branch), !!v.create))
+      },
+      worktreeRemove: async (path: string) => {
+        const v = await prompt({ title: 'Remove Worktree', danger: true, okLabel: 'Remove', message: path, fields: [{ key: 'force', label: 'Force (discard local changes there)', type: 'checkbox' }] })
+        if (!v) return
+        await run('Remove worktree', () => api.worktreeRemove(need(), path, !!v.force))
+      },
+      openPath: (path: string) => void s.addRepo(path),
       ignore: async (file: FileEntry) => {
         const v = await prompt({ title: 'Ignore', okLabel: 'Ignore', fields: [{ key: 'pattern', label: 'Pattern to add to .gitignore', value: file.path }] })
         if (!v || !v.pattern) return

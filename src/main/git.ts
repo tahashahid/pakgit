@@ -35,7 +35,10 @@ const baseEnv: Record<string, string> = {
   GIT_OPTIONAL_LOCKS: '0'
 }
 
+let configuredGit: string | null = null
+export function setGitExecutable(path: string | null): void { configuredGit = path && path.trim() ? path.trim() : null }
 export function gitExecutable(): string {
+  if (configuredGit) return configuredGit
   if (process.env.PAKGIT_GIT) return process.env.PAKGIT_GIT
   if (process.platform === 'win32') {
     const candidates = [
@@ -216,8 +219,9 @@ function parseLog(stdout: string): Commit[] {
   })
 }
 
-export async function log(repo: string, opts: { limit?: number; all?: boolean; skip?: number; path?: string } = {}): Promise<Commit[]> {
+export async function log(repo: string, opts: { limit?: number; all?: boolean; skip?: number; path?: string; follow?: boolean } = {}): Promise<Commit[]> {
   const args = ['log', `--format=${LOG_FORMAT}`, `-n${opts.limit ?? 500}`, '--date-order']
+  if (opts.follow && opts.path) args.push('--follow')
   if (opts.skip) args.push(`--skip=${opts.skip}`)
   if (opts.all !== false) args.push('--all')
   if (opts.path) args.push('--', opts.path)
@@ -402,4 +406,159 @@ export async function clone(url: string, dest: string): Promise<void> {
 }
 export async function init(path: string): Promise<void> {
   await run(['init', '-b', 'main', path], { cwd: process.cwd() })
+}
+
+// ---------- v0.2 additions ----------
+
+/** Apply a patch to the index (stage/unstage a hunk). */
+export async function applyPatch(repo: string, patch: string, o: { cached: boolean; reverse?: boolean }): Promise<void> {
+  const args = ['apply', '--whitespace=nowarn']
+  if (o.cached) args.push('--cached')
+  if (o.reverse) args.push('-R')
+  args.push('-')
+  await run(args, { cwd: repo, input: patch.endsWith('\n') ? patch : patch + '\n' })
+}
+
+export async function resolveConflict(repo: string, path: string, side: 'ours' | 'theirs'): Promise<void> {
+  await git(repo, 'checkout', `--${side}`, '--', path)
+  await git(repo, 'add', '--', path)
+}
+export async function markResolved(repo: string, paths: string[]): Promise<void> {
+  await git(repo, 'add', '--', ...paths)
+}
+export async function conflictFile(repo: string, path: string): Promise<string> {
+  const { readFileSync } = await import('fs')
+  try { return readFileSync(join(repo, path), 'utf8') } catch { return '' }
+}
+
+export interface RebaseTodoEntry { action: 'pick' | 'squash' | 'fixup' | 'drop' | 'reword'; sha: string; subject: string }
+/** Non-interactive "interactive" rebase: we write the todo list ourselves. */
+export async function rebaseInteractive(repo: string, base: string, todo: RebaseTodoEntry[], rewords: Record<string, string> = {}): Promise<void> {
+  const { writeFileSync, mkdtempSync, rmSync } = await import('fs')
+  const { tmpdir } = await import('os')
+  const dir = mkdtempSync(join(tmpdir(), 'pakgit-rebase-'))
+  const todoPath = join(dir, 'todo').replace(/\\/g, '/')
+  const lines = todo.filter((t) => t.action !== 'drop').map((t) => `${t.action === 'reword' ? 'pick' : t.action} ${t.sha} ${t.subject}`)
+  writeFileSync(todoPath, lines.join('\n') + '\n')
+  try {
+    await run(['rebase', '-i', '--no-autosquash', base === '--root' ? '--root' : base], {
+      cwd: repo,
+      env: { GIT_SEQUENCE_EDITOR: `cp "${todoPath}"`, GIT_EDITOR: 'true' }
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  // rewords: after a successful rebase, rewrite messages by walking the new history
+  const toReword = todo.filter((t) => t.action === 'reword' && rewords[t.sha])
+  if (toReword.length) {
+    const { stdout } = await git(repo, 'log', '--format=%H%x00%s', base === '--root' ? 'HEAD' : `${base}..HEAD`)
+    const newBySubject = new Map<string, string>()
+    for (const l of stdout.split('\n')) { const [sha, subject] = l.split('\0'); if (sha) newBySubject.set(subject, sha) }
+    for (const t of toReword) {
+      const newSha = newBySubject.get(t.subject)
+      if (!newSha) continue
+      const env = { GIT_SEQUENCE_EDITOR: 'true', GIT_EDITOR: 'true' }
+      // reword a single commit by re-running rebase with an exec that amends it
+      const { writeFileSync: w } = await import('fs')
+      const msgPath = join(tmpdir(), `pakgit-msg-${newSha.slice(0, 8)}.txt`).replace(/\\/g, '/')
+      w(msgPath, rewords[t.sha])
+      const { stdout: parents } = await git(repo, 'rev-list', '--parents', '-n', '1', newSha)
+      const parent = parents.trim().split(' ')[1]
+      if (!parent) { await run(['commit', '--amend', '-F', msgPath], { cwd: repo, env }); continue }
+      const todo2 = `pick ${newSha} ${t.subject}\nexec git commit --amend -F "${msgPath}"\n` +
+        (await git(repo, 'log', '--reverse', '--format=pick %H %s', `${newSha}..HEAD`)).stdout
+      const p2 = join(tmpdir(), `pakgit-todo-${newSha.slice(0, 8)}`).replace(/\\/g, '/')
+      w(p2, todo2)
+      await run(['rebase', '-i', '--no-autosquash', parent], { cwd: repo, env: { GIT_SEQUENCE_EDITOR: `cp "${p2}"`, GIT_EDITOR: 'true' } })
+    }
+  }
+}
+
+export interface BlameLine { sha: string; author: string; date: string; line: number; text: string; summary: string }
+export async function blameStructured(repo: string, path: string, rev?: string): Promise<BlameLine[]> {
+  const args = ['blame', '--line-porcelain']
+  if (rev) args.push(rev)
+  args.push('--', path)
+  const { stdout } = await run(args, { cwd: repo })
+  const out: BlameLine[] = []
+  const meta = new Map<string, { author: string; date: string; summary: string }>()
+  let cur: Partial<BlameLine> & { sha?: string } = {}
+  for (const l of stdout.split('\n')) {
+    const head = /^([0-9a-f]{40}) \d+ (\d+)/.exec(l)
+    if (head) { cur = { sha: head[1], line: +head[2] }; continue }
+    if (l.startsWith('author ')) meta.set(cur.sha!, { ...(meta.get(cur.sha!) ?? { author: '', date: '', summary: '' }), author: l.slice(7) })
+    else if (l.startsWith('author-time ')) meta.set(cur.sha!, { ...(meta.get(cur.sha!)!), date: new Date(+l.slice(12) * 1000).toISOString().slice(0, 10) })
+    else if (l.startsWith('summary ')) meta.set(cur.sha!, { ...(meta.get(cur.sha!)!), summary: l.slice(8) })
+    else if (l.startsWith('\t')) {
+      const m = meta.get(cur.sha!) ?? { author: '', date: '', summary: '' }
+      out.push({ sha: cur.sha!, line: cur.line!, text: l.slice(1), author: m.author, date: m.date, summary: m.summary })
+    }
+  }
+  return out
+}
+
+export async function stashShow(repo: string, index: number): Promise<string> {
+  const r = await run(['stash', 'show', '-p', '--include-untracked', `stash@{${index}}`], { cwd: repo, allowFail: true })
+  if (r.code === 0) return r.stdout
+  return (await run(['stash', 'show', '-p', `stash@{${index}}`], { cwd: repo, allowFail: true })).stdout
+}
+
+export async function setUpstream(repo: string, branch: string, upstream: string): Promise<void> {
+  await git(repo, 'branch', `--set-upstream-to=${upstream}`, branch)
+}
+
+export async function emptyCommit(repo: string, message: string): Promise<void> {
+  await run(['commit', '--allow-empty', '-F', '-'], { cwd: repo, input: message })
+}
+
+export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
+export async function submodules(repo: string): Promise<SubmoduleInfo[]> {
+  if (!existsSync(join(repo, '.gitmodules'))) return []
+  const r = await run(['submodule', 'status'], { cwd: repo, allowFail: true })
+  if (r.code !== 0) return []
+  return r.stdout.split('\n').filter(Boolean).map((l) => {
+    const m = /^([ \-+U])([0-9a-f]+) (\S+)(?: \((.*)\))?/.exec(l)
+    if (!m) return null
+    const state = m[1] === '-' ? 'uninitialized' : m[1] === '+' ? 'modified' : m[1] === 'U' ? 'conflict' : 'initialized'
+    return { path: m[3], sha: m[2], state, ref: m[4] ?? '' } as SubmoduleInfo
+  }).filter((x): x is SubmoduleInfo => !!x)
+}
+export async function submoduleUpdate(repo: string, paths?: string[]): Promise<void> {
+  await git(repo, 'submodule', 'update', '--init', '--recursive', ...(paths?.length ? ['--', ...paths] : []))
+}
+
+export interface WorktreeInfo { path: string; sha: string; branch: string | null; main: boolean }
+export async function worktrees(repo: string): Promise<WorktreeInfo[]> {
+  const { stdout } = await git(repo, 'worktree', 'list', '--porcelain')
+  const out: WorktreeInfo[] = []
+  let cur: Partial<WorktreeInfo> = {}
+  for (const l of stdout.split('\n')) {
+    if (l.startsWith('worktree ')) cur = { path: l.slice(9), branch: null, main: out.length === 0 }
+    else if (l.startsWith('HEAD ')) cur.sha = l.slice(5)
+    else if (l.startsWith('branch ')) cur.branch = l.slice(7).replace('refs/heads/', '')
+    else if (l === '' && cur.path) { out.push(cur as WorktreeInfo); cur = {} }
+  }
+  if (cur.path) out.push(cur as WorktreeInfo)
+  return out
+}
+export async function worktreeAdd(repo: string, path: string, branch: string, create: boolean): Promise<void> {
+  await git(repo, 'worktree', 'add', ...(create ? ['-b', branch, path] : [path, branch]))
+}
+export async function worktreeRemove(repo: string, path: string, force?: boolean): Promise<void> {
+  await git(repo, 'worktree', 'remove', ...(force ? ['--force'] : []), path)
+}
+
+export async function formatPatch(repo: string, sha: string, dest: string): Promise<void> {
+  const { writeFileSync } = await import('fs')
+  const { stdout } = await git(repo, 'format-patch', '-1', '--stdout', sha)
+  writeFileSync(dest, stdout)
+}
+export async function applyPatchFile(repo: string, file: string): Promise<void> {
+  const r = await run(['am', '--3way', file], { cwd: repo, allowFail: true, env: { GIT_EDITOR: 'true' } })
+  if (r.code === 0) return
+  await run(['am', '--abort'], { cwd: repo, allowFail: true })
+  await git(repo, 'apply', '--3way', file)
+}
+export async function clean(repo: string, includeIgnored: boolean): Promise<void> {
+  await git(repo, 'clean', '-f', '-d', ...(includeIgnored ? ['-x'] : []))
 }

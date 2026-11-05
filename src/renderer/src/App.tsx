@@ -9,6 +9,8 @@ import { CommitPanel } from './components/CommitPanel'
 import { CommitDetailsPanel, LogPanel } from './components/LogPanel'
 import { OutputPanel } from './components/OutputPanel'
 import { Btn, Dialog, Split, Toasts } from './components/ui'
+import { RebaseDialog } from './components/RebaseDialog'
+import { SettingsDialog } from './components/SettingsDialog'
 import { useActions } from './lib/actions'
 
 function Layout(): JSX.Element {
@@ -20,18 +22,20 @@ function Layout(): JSX.Element {
     const map: Record<string, () => unknown> = {
       'repo:open': a.openRepo, 'repo:clone': a.clone, 'repo:init': a.init, 'repo:refresh': () => window.dispatchEvent(new Event('pakgit:refresh')),
       'repo:terminal': a.terminal, 'remote:fetch': a.fetch, 'remote:pull': a.pull, 'remote:push': a.push,
-      'local:commit': a.focusCommit, 'local:stage-all': a.stageAll, 'local:stash': a.stash
+      'local:commit': a.focusCommit, 'local:stage-all': a.stageAll, 'local:stash': a.stash,
+      'local:empty-commit': a.emptyCommit, 'repo:apply-patch': a.applyPatch, 'repo:clean': a.clean
     }
     map[action]?.()
   }), [a])
-  const { setPerspective, toggleTheme, refresh } = useStore()
+  const { setPerspective, toggleTheme, refresh, setShowSettings } = useStore()
   useEffect(() => window.pakgitMenu.on((action) => {
+    if (action === 'view:settings') setShowSettings(true)
     if (action === 'view:standard') setPerspective('standard')
     if (action === 'view:log') setPerspective('log')
     if (action === 'view:worktree') setPerspective('worktree')
     if (action === 'view:theme') toggleTheme()
     if (action === 'repo:refresh') void refresh()
-  }), [setPerspective, toggleTheme, refresh])
+  }), [setPerspective, toggleTheme, refresh, setShowSettings])
 
   if (!repo) {
     return (
@@ -109,6 +113,12 @@ function Layout(): JSX.Element {
   )
 }
 
+function RebaseDialogGate(): JSX.Element | null {
+  const { rebase } = useStore()
+  // keyed so the dialog's local state resets for every new rebase request
+  return rebase ? <RebaseDialog key={rebase.base + rebase.todo.length} /> : null
+}
+
 export default function App(): JSX.Element {
   return (
     <StoreProvider>
@@ -116,6 +126,8 @@ export default function App(): JSX.Element {
         <Toolbar />
         <Layout />
         <Dialog />
+        <RebaseDialogGate />
+        <SettingsDialog />
         <Toasts />
       </div>
     </StoreProvider>

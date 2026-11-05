@@ -38,9 +38,21 @@ export function FilesPanel(): JSX.Element {
   const toggle = (f: FileEntry) => (f.area === 'staged' ? a.unstage(target(f)) : a.stage(target(f)))
   const menuFor = (e: React.MouseEvent, f: FileEntry) => {
     const t = target(f)
+    const conflicted = f.area === 'conflicted'
     openMenu(e, [
-      f.area === 'staged' ? { label: 'Unstage', onClick: () => void a.unstage(t) } : { label: 'Stage', onClick: () => void a.stage(t) },
-      { label: 'Discard…', danger: true, onClick: () => void a.discard(t), disabled: f.area === 'staged' && t.some((x) => x.area === 'staged' && !status?.files.some((y) => y.path === x.path && y.area === 'unstaged')) && false },
+      ...(conflicted ? [
+        { label: 'Take Ours (current branch)', onClick: () => void a.resolve(f, 'ours') },
+        { label: 'Take Theirs (incoming)', onClick: () => void a.resolve(f, 'theirs') },
+        { label: 'Mark Resolved', onClick: () => void a.markResolved(t) },
+        { separator: true, label: '' }
+      ] : [
+        f.area === 'staged' ? { label: 'Unstage', onClick: () => void a.unstage(t) } : { label: 'Stage', onClick: () => void a.stage(t) },
+        { label: 'Discard…', danger: true, onClick: () => void a.discard(t) },
+        ...(f.area === 'untracked' ? [{ label: 'Move to Trash…', danger: true, onClick: () => void a.trash(t) }] : []),
+        { separator: true, label: '' }
+      ]),
+      { label: 'Show File Log', onClick: () => a.fileLog(f), disabled: f.area === 'untracked' },
+      { label: 'Blame', onClick: () => void a.blame(f), disabled: f.area === 'untracked' },
       { separator: true, label: '' },
       { label: 'Open in default editor', onClick: () => void a.openFile(f) },
       { label: 'Reveal in file manager', onClick: () => void a.reveal(f) },
