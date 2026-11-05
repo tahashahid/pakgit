@@ -34,6 +34,7 @@ import { Icon } from '../ui/icon'
         <button class="btn small" [class.active]="store.perspective() === 'standard'" title="Standard window (Cmd/Ctrl+1)" (click)="store.perspective.set('standard')">Standard</button>
         <button class="btn small" [class.active]="store.perspective() === 'log'" title="Log window (Cmd/Ctrl+2)" (click)="store.perspective.set('log')">Log</button>
         <button class="btn small" [class.active]="store.perspective() === 'worktree'" title="Working tree window (Cmd/Ctrl+3)" (click)="store.perspective.set('worktree')">Working Tree</button>
+        <button class="btn small" [class.active]="store.perspective() === 'release'" title="Release planning (Cmd/Ctrl+4)" (click)="store.perspective.set('release')">Release</button>
       </div>
       <button class="btn small ghost" title="Toggle theme" (click)="store.toggleTheme()"><pg-icon [name]="store.theme() === 'dark' ? 'sun' : 'moon'" /></button>
       <button class="btn small ghost" title="Settings (Cmd/Ctrl+,)" (click)="store.showSettings.set(true)"><pg-icon name="gear" /></button>

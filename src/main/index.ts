@@ -4,6 +4,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { spawn } from 'child_process'
 import chokidar, { FSWatcher } from 'chokidar'
 import * as git from './git'
+import * as release from './release'
+import { configureTracker, tracker } from './tracker'
 import type { CommitOptions, DiffRequest, FileArea, RepoEntry } from '@shared/types'
 
 // ---------- repository registry ----------
@@ -38,15 +40,19 @@ async function registerRepo(path: string): Promise<RepoEntry> {
 
 import type { Settings } from '@shared/types'
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
-const defaultSettings: Settings = { gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true }
+const defaultSettings: Settings = {
+  gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true,
+  tracker: { provider: 'none', linearApiKey: '', stateOnStart: 'In Progress', stateOnDev: 'QA', stateOnStage: 'UAT', stateOnRelease: 'Done' }
+}
 function loadSettings(): Settings {
-  try { return { ...defaultSettings, ...JSON.parse(readFileSync(settingsFile(), 'utf8')) } } catch { return { ...defaultSettings } }
+  try { const s = JSON.parse(readFileSync(settingsFile(), 'utf8')); return { ...defaultSettings, ...s, tracker: { ...defaultSettings.tracker, ...(s.tracker ?? {}) } } } catch { return { ...defaultSettings } }
 }
 function saveSettings(s: Settings): Settings {
   mkdirSync(dirname(settingsFile()), { recursive: true })
-  const merged = { ...defaultSettings, ...s }
+  const merged = { ...defaultSettings, ...s, tracker: { ...defaultSettings.tracker, ...(s.tracker ?? {}) } }
   writeFileSync(settingsFile(), JSON.stringify(merged, null, 2))
   git.setGitExecutable(merged.gitPath)
+  configureTracker(merged.tracker)
   return merged
 }
 
@@ -106,8 +112,11 @@ function createWindow(): BrowserWindow {
     }, Number(process.env.PAKGIT_SCREENSHOT_DELAY ?? 4000)))
   }
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' } })
-  const query = process.env.PAKGIT_SCREENSHOT_SELECT ? { select: process.env.PAKGIT_SCREENSHOT_SELECT } : undefined
-  if (process.env['ELECTRON_RENDERER_URL']) win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (query ? `?select=${encodeURIComponent(query.select)}` : ''))
+  const query: Record<string, string> = {}
+  if (process.env.PAKGIT_SCREENSHOT_SELECT) query.select = process.env.PAKGIT_SCREENSHOT_SELECT
+  if (process.env.PAKGIT_SCREENSHOT_PERSPECTIVE) query.perspective = process.env.PAKGIT_SCREENSHOT_PERSPECTIVE
+  const qs = Object.keys(query).length ? '?' + new URLSearchParams(query).toString() : ''
+  if (process.env['ELECTRON_RENDERER_URL']) win.loadURL(process.env['ELECTRON_RENDERER_URL'] + qs)
   else win.loadFile(join(__dirname, '../renderer/index.html'), { query })
   return win
 }
@@ -158,6 +167,7 @@ function buildMenu(): void {
         { label: 'Standard Window', accelerator: 'CmdOrCtrl+1', click: send('view:standard') },
         { label: 'Log Window', accelerator: 'CmdOrCtrl+2', click: send('view:log') },
         { label: 'Working Tree Window', accelerator: 'CmdOrCtrl+3', click: send('view:worktree') },
+        { label: 'Release Window', accelerator: 'CmdOrCtrl+4', click: send('view:release') },
         { type: 'separator' },
         { label: 'Toggle Theme', click: send('view:theme') },
         { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: send('view:settings') },
@@ -298,6 +308,20 @@ function registerIpc(): void {
     const r = await dialog.showOpenDialog({ title, properties: ['openFile'] })
     return r.canceled ? null : r.filePaths[0] ?? null
   })
+  handle('release:config', (repo: string) => release.releaseConfig(repo))
+  handle('release:saveConfig', (repo: string, cfg: Parameters<typeof release.saveReleaseConfig>[1]) => release.saveReleaseConfig(repo, cfg))
+  handle('release:analyze', (repo: string) => release.analyze(repo))
+  handle('release:promote', (repo: string, env: 'dev' | 'stage', items: release.PromoteInput[], push: boolean) => release.promote(repo, env, items, push))
+  handle('release:start', (repo: string, name: string, items: release.PromoteInput[], push: boolean) => release.startRelease(repo, name, items, push))
+  handle('release:finish', (repo: string, branch: string, tag: string | null, push: boolean) => release.finishRelease(repo, branch, tag, push))
+  handle('release:sync', (repo: string, push: boolean) => release.syncEnvironments(repo, push))
+  handle('release:startIssue', (repo: string, _key: string, branchName: string) => release.startIssue(repo, branchName))
+  handle('release:enableRerere', (repo: string) => release.enableRerere(repo))
+  handle('tracker:status', () => tracker().status())
+  handle('tracker:issues', (keys: string[]) => tracker().getIssues(keys))
+  handle('tracker:myIssues', () => tracker().myActiveIssues())
+  handle('tracker:setState', (key: string, state: string) => tracker().setState(key, state))
+  handle('tracker:states', (key: string) => tracker().states(key))
   handle('settings:get', () => loadSettings())
   handle('settings:save', (s: Settings) => saveSettings(s))
   handle('git:applyPatch', (repo: string, patch: string, o: { cached: boolean; reverse?: boolean }) => git.applyPatch(repo, patch, o))
@@ -327,6 +351,8 @@ function registerIpc(): void {
 app.whenReady().then(() => {
   git.setLogSink((line) => broadcast('git:log', line))
   git.setGitExecutable(loadSettings().gitPath)
+  configureTracker(loadSettings().tracker)
+  release.setReleaseConfigDir(app.getPath('userData'))
   registerIpc()
   buildMenu()
   createWindow()

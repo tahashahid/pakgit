@@ -11,6 +11,7 @@ import { Log, CommitDetails } from './panels/log'
 import { Output } from './panels/output'
 import { RebaseDialog } from './panels/rebase-dialog'
 import { SettingsDialog } from './panels/settings-dialog'
+import { Release } from './panels/release'
 import { Split } from './ui/split'
 import { Dialog } from './ui/dialog'
 import { Toasts } from './ui/toasts'
@@ -18,7 +19,7 @@ import { ContextMenu } from './ui/context-menu'
 
 @Component({
   selector: 'pg-app',
-  imports: [Toolbar, Repositories, Branches, Files, Changes, Commit, Log, CommitDetails, Output, RebaseDialog, SettingsDialog, Split, Dialog, Toasts, ContextMenu],
+  imports: [Toolbar, Repositories, Branches, Files, Changes, Commit, Log, CommitDetails, Output, RebaseDialog, SettingsDialog, Release, Split, Dialog, Toasts, ContextMenu],
   template: `
     <div class="app">
       <pg-toolbar />
@@ -52,6 +53,7 @@ import { ContextMenu } from './ui/context-menu'
                     </pg-split>
                   </pg-split>
                 }
+                @case ('release') { <pg-release /> }
                 @case ('worktree') {
                   <pg-split dir="h" [initial]="420" storageKey="wt-main" [min]="200">
                     <pg-split first dir="v" [initial]="520" storageKey="wt-left" [min]="120">
@@ -110,6 +112,7 @@ export class App {
       'local:commit': a.focusCommit, 'local:stage-all': a.stageAll, 'local:stash': a.stash,
       'local:empty-commit': a.emptyCommit, 'repo:apply-patch': a.applyPatch, 'repo:clean': a.clean,
       'view:standard': () => s.perspective.set('standard'), 'view:log': () => s.perspective.set('log'), 'view:worktree': () => s.perspective.set('worktree'),
+      'view:release': () => s.perspective.set('release'),
       'view:theme': () => s.toggleTheme(), 'view:settings': () => s.showSettings.set(true)
     }
     window.pakgitMenu.on((action) => void map[action]?.())

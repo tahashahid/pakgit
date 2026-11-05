@@ -1,7 +1,7 @@
 import { Injectable, computed, effect, signal } from '@angular/core'
-import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, RebaseTodoEntry, Refs, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, WorktreeInfo } from '@shared/types'
+import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, RebaseTodoEntry, Refs, ReleaseAnalysis, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, TrackerStatus, WorktreeInfo } from '@shared/types'
 
-export type Perspective = 'standard' | 'log' | 'worktree'
+export type Perspective = 'standard' | 'log' | 'worktree' | 'release'
 export type Theme = 'light' | 'dark'
 export interface Toast { id: number; kind: 'error' | 'info' | 'success'; text: string }
 export interface DialogField { key: string; label: string; value?: string; type?: 'text' | 'textarea' | 'checkbox' | 'select'; options?: string[]; placeholder?: string }
@@ -38,7 +38,7 @@ export class Store {
   readonly diff = signal('')
   readonly busy = signal<string | null>(null)
   readonly toasts = signal<Toast[]>([])
-  readonly perspective = signal<Perspective>(LS.get('perspective', 'standard'))
+  readonly perspective = signal<Perspective>((new URLSearchParams(location.search).get('perspective') as Perspective | null) ?? LS.get('perspective', 'standard'))
   readonly theme = signal<Theme>(LS.get('theme', window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   readonly output = signal<GitLogLine[]>([])
   readonly error = signal<string | null>(null)
@@ -47,6 +47,10 @@ export class Store {
   readonly rebase = signal<RebaseSpec | null>(null)
   readonly dialog = signal<{ spec: DialogSpec; resolve: (v: DialogResult) => void } | null>(null)
   readonly gitVersion = signal('')
+  // release planning
+  readonly release = signal<ReleaseAnalysis | null>(null)
+  readonly releaseLoading = signal(false)
+  readonly trackerStatus = signal<TrackerStatus | null>(null)
 
   readonly effectiveLogLimit = computed(() => this.logLimit() || this.settings()?.logLimit || 400)
   readonly singleFile = computed(() => (this.selectedFiles().length === 1 ? this.selectedFiles()[0] : null))
@@ -131,7 +135,16 @@ export class Store {
     }
   }
 
+  async analyzeRelease(): Promise<void> {
+    const r = this.repo(); if (!r) { this.release.set(null); return }
+    this.releaseLoading.set(true)
+    try { this.release.set(await this.api.releaseAnalyze(r.path)) } catch (e) { this.toast('error', `Release analysis: ${e instanceof Error ? e.message : String(e)}`) }
+    finally { this.releaseLoading.set(false) }
+  }
+  async refreshTracker(): Promise<void> { try { this.trackerStatus.set(await this.api.trackerStatus()) } catch { this.trackerStatus.set(null) } }
+
   openRepo(entry: RepoEntry): void {
+    this.release.set(null)
     this.selectedFiles.set([]); this.selectedCommit.set(null); this.selectedCommitFile.set(null); this.selectedStash.set(null); this.blame.set(null); this.diff.set('')
     this.logPath.set(null); this.logLimit.set(0)
     this.repo.set(entry)

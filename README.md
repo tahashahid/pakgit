@@ -25,9 +25,16 @@ See [ANALYSIS.md](ANALYSIS.md) for the SmartGit feature analysis this design is 
   reset (soft / mixed / hard), create patch
 - **Commit Details** panel: metadata, message, changed files with +/- counts, per-file diff
 - **Output** panel: every git command with timing, exit code and stderr
+- **Release** perspective: see what is on dev but not on stage, and on stage but not on
+  production, grouped by Linear issue; tick items and merge them into stage, create a release
+  branch from main with only the approved items, finish a release (merge, tag, back-merge
+  main → stage → dev), sync environments, start work on a Linear issue from main. The process
+  is documented in [docs/WORKFLOW.md](docs/WORKFLOW.md). Issue trackers are pluggable
+  (`src/main/tracker/`); Linear is the first provider.
+- Repository groups; branches and tags shown as folders by `/` prefix
 - Repository menu: apply patch, clean working tree
 - **Settings**: git executable, default pull strategy, background fetch interval, log size,
-  discard confirmation, theme
+  discard confirmation, theme, issue tracker (Linear API key and status mapping)
 - Three perspectives (Standard, Log, Working Tree), light and dark theme, resizable panes with
   persisted sizes, automatic refresh on working-tree changes (chokidar)
 

@@ -121,12 +121,13 @@ export interface Settings {
   autoFetchMinutes: number
   logLimit: number
   confirmDiscard: boolean
+  tracker: TrackerSettings
 }
 
 export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
 export interface WorktreeInfo { path: string; sha: string; branch: string | null; main: boolean }
 
-export interface PakGitApi {
+export interface PakGitApi extends ReleaseApi {
   listGroups(): Promise<string[]>
   createGroup(name: string): Promise<string[]>
   renameGroup(oldName: string, newName: string): Promise<void>
@@ -211,4 +212,118 @@ export interface PakGitApi {
   onRepoChanged(cb: (repo: string) => void): () => void
   onGitLog(cb: (line: GitLogLine) => void): () => void
   getGitLog(): Promise<GitLogLine[]>
+}
+
+// ---------- issue trackers (Linear first; Jira / GitHub Issues can implement the same shape) ----------
+
+export type TrackerId = 'none' | 'linear'
+
+export interface TrackerIssue {
+  key: string
+  title: string
+  status: string
+  /** generic bucket so the UI can colour statuses without knowing the tracker */
+  statusType: 'backlog' | 'unstarted' | 'started' | 'completed' | 'canceled' | 'unknown'
+  url: string
+  assignee?: string
+  /** branch name suggested by the tracker (Linear "copy git branch name") */
+  branchName?: string
+}
+
+export interface TrackerStatus {
+  provider: TrackerId
+  configured: boolean
+  /** e.g. workspace or user name once authenticated */
+  account?: string
+  error?: string
+}
+
+export interface TrackerSettings {
+  provider: TrackerId
+  linearApiKey: string
+  /** map of workflow events to tracker state names; empty = do not update */
+  stateOnDev: string
+  stateOnStage: string
+  stateOnRelease: string
+  stateOnStart: string
+}
+
+// ---------- release planning ----------
+
+export interface EnvConfig {
+  remote: string
+  dev: string
+  stage: string
+  prod: string
+  releasePrefix: string
+}
+
+export interface ReleaseBranchRef {
+  /** short ref as used with git, e.g. origin/taha/cyb4-1-foo or taha/cyb4-1-foo */
+  ref: string
+  name: string
+  remote: string | null
+  sha: string
+  date: string
+  /** own commits not on prod (first-parent, no merges); only computed for unreleased items */
+  own?: number
+  /** cut from dev/stage: its first-parent line contains environment merge commits */
+  basedOnEnv?: boolean
+}
+
+export interface ReleaseItem {
+  /** stable id: issue key when known, otherwise the normalised branch name */
+  id: string
+  issueKey: string | null
+  /** branch name without -dev/-stage/-main suffix */
+  name: string
+  branches: ReleaseBranchRef[]
+  inDev: boolean
+  inStage: boolean
+  inProd: boolean
+  /** the branch's own commits not yet on prod (first-parent, no merges); null when no branch exists */
+  commitsAheadOfProd: number | null
+  /** the branch was cut from an environment branch (dev/stage) and carries its history */
+  basedOnEnv: boolean
+  /** true when the work only exists as commits on an env branch (branch deleted): needs cherry-pick */
+  needsCherryPick: boolean
+  /** commits found on env branches carrying the issue key (used for cherry-pick fallback and details) */
+  commits: Commit[]
+  lastActivity: string
+  issue?: TrackerIssue
+}
+
+export interface ReleaseAnalysis {
+  config: EnvConfig
+  refs: { dev: string | null; stage: string | null; prod: string | null }
+  items: ReleaseItem[]
+  releaseBranches: ReleaseBranchRef[]
+  currentBranch: string | null
+  rerere: boolean
+}
+
+export interface PromoteResult {
+  merged: string[]
+  conflict: string | null
+  skipped: string[]
+  message: string
+}
+
+export interface ReleaseApi {
+  releaseConfig(repo: string): Promise<EnvConfig>
+  saveReleaseConfig(repo: string, cfg: EnvConfig): Promise<EnvConfig>
+  releaseAnalyze(repo: string): Promise<ReleaseAnalysis>
+  /** merge feature branches into an environment branch (stage or dev) */
+  promote(repo: string, env: 'dev' | 'stage', items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
+  startRelease(repo: string, name: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
+  finishRelease(repo: string, releaseBranch: string, tag: string | null, push: boolean): Promise<PromoteResult>
+  syncEnvironments(repo: string, push: boolean): Promise<PromoteResult>
+  startIssue(repo: string, key: string, branchName: string): Promise<void>
+  enableRerere(repo: string): Promise<void>
+
+  trackerStatus(): Promise<TrackerStatus>
+  trackerIssues(keys: string[]): Promise<TrackerIssue[]>
+  trackerMyIssues(): Promise<TrackerIssue[]>
+  trackerSetState(key: string, stateName: string): Promise<void>
+  trackerStates(key: string): Promise<string[]>
 }
