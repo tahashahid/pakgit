@@ -86,6 +86,10 @@ function createWindow(): BrowserWindow {
   })
   if (process.env.PAKGIT_SCREENSHOT) {
     win.webContents.once('did-finish-load', () => setTimeout(async () => {
+      if (process.env.PAKGIT_SCREENSHOT_EVAL) {
+        try { console.log('eval:', JSON.stringify(await win.webContents.executeJavaScript(process.env.PAKGIT_SCREENSHOT_EVAL))) }
+        catch (e) { console.log('eval error:', e instanceof Error ? e.message : String(e)) }
+      }
       const img = await win.webContents.capturePage()
       writeFileSync(process.env.PAKGIT_SCREENSHOT!, img.toPNG())
       console.log(`screenshot written to ${process.env.PAKGIT_SCREENSHOT}`)

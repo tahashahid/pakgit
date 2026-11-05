@@ -7,9 +7,20 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "composite": true,
-    "types": ["node", "electron-vite/node"],
-    "baseUrl": ".",
-    "paths": { "@shared/*": ["src/shared/*"] }
+    "types": [
+      "node",
+      "electron-vite/node"
+    ],
+    "paths": {
+      "@shared/*": [
+        "./src/shared/*"
+      ]
+    }
   },
-  "include": ["electron.vite.config.ts", "src/main/**/*", "src/preload/**/*", "src/shared/**/*"]
+  "include": [
+    "electron.vite.config.ts",
+    "src/main/**/*",
+    "src/preload/**/*",
+    "src/shared/**/*"
+  ]
 }
