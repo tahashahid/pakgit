@@ -1,5 +1,5 @@
 import { Component, computed, effect, inject, signal } from '@angular/core'
-import { Store } from '../store.service'
+import { LS, Store } from '../store.service'
 import { Icon } from '../ui/icon'
 import { Panel } from '../ui/panel'
 import { Split } from '../ui/split'
@@ -117,8 +117,8 @@ type Tab = string
               </table>
             </div>
             <div class="release-actions">
-              <label><input type="checkbox" [checked]="push()" (change)="push.set($any($event.target).checked)" />Push after merging</label>
-              <label [title]="trackerOk() ? '' : 'Connect Linear in Settings'"><input type="checkbox" [checked]="updateTracker()" [disabled]="!trackerOk()" (change)="updateTracker.set($any($event.target).checked)" />Update Linear status</label>
+              <label title="Sync environments and direct merges push what they create (sync branches or the environment branch). Promote selected… has its own push option."><input type="checkbox" [checked]="push()" (change)="push.set($any($event.target).checked)" />Push (sync &amp; direct merges)</label>
+              <label [title]="trackerOk() ? 'After a promotion, move the Linear issue of each item to the state configured for that environment (Configure)' : 'Connect Linear in Settings'"><input type="checkbox" [checked]="updateTracker()" [disabled]="!trackerOk()" (change)="updateTracker.set($any($event.target).checked)" />Update Linear status on promote</label>
               <span style="flex:1"></span>
               <span class="muted">{{ checked().size }} selected</span>
               @if (tab() === 'archived') {
@@ -205,8 +205,9 @@ export class Release {
   readonly filter = signal('')
   readonly checked = signal<Set<string>>(new Set())
   readonly selected = signal<ReleaseItem | null>(null)
-  readonly push = signal(true)
-  readonly updateTracker = signal(true)
+  /** remembered across views and restarts */
+  readonly push = signal<boolean>(LS.get('release.push', true))
+  readonly updateTracker = signal<boolean>(LS.get('release.updateTracker', true))
   readonly showHelp = signal(false)
   readonly busy = signal(false)
   readonly issuePicker = signal<TrackerIssue[] | null>(null)
@@ -231,6 +232,8 @@ export class Release {
   readonly trackerOk = computed(() => { const t = this.store.trackerStatus(); return !!t && t.configured && !t.error })
 
   constructor() {
+    effect(() => LS.set('release.push', this.push()))
+    effect(() => LS.set('release.updateTracker', this.updateTracker()))
     effect(() => { if (this.store.repo() && !this.store.release() && !this.store.releaseLoading()) void this.store.analyzeRelease() })
     // default tab: the first environment after the first one that has candidates, else 'unreleased'
     effect(() => { const envs = this.envs(); if (envs.length >= 2 && !envs.some((e) => e.id === this.tab()) && this.tab() === 'unreleased' && this.store.release()) this.tab.set(envs[1].id) })
