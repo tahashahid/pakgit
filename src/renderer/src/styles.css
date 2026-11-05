@@ -26,7 +26,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .toolbar .repo-name { font-weight: 600; margin-right: 8px; display: flex; align-items: center; gap: 6px; white-space: nowrap; min-width: 0; overflow: hidden; }
 .toolbar .repo-name > span:first-child, .toolbar .branch-pill { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolbar .branch-pill { max-width: 320px; }
-.toolbar .repo-name > span:first-child { flex: none; max-width: 220px; }
+.toolbar .repo-name > span:first-child { flex: 0 1 auto; min-width: 28px; max-width: 220px; }
+.toolbar .repo-name > .branch-pill { flex: none; max-width: 200px; }
 .toolbar .branch-pill .badge { overflow: hidden; text-overflow: ellipsis; }
 .toolbar .tool-group, .toolbar > .btn { flex: none; }
 .toolbar .branch-pill { background: var(--bg3); border: 1px solid var(--border); border-radius: 12px; padding: 1px 10px; font-weight: 500; display: inline-flex; gap: 6px; align-items: center; min-width: 0; }
@@ -159,3 +160,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .commit-form .subject-wrap .subject { flex: 1; }
 .commit-form .subject-wrap .btn { position: absolute; right: 2px; top: 2px; }
 .sub-state { font-size: 10.5px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border); color: var(--fg-muted); }
+
+/* compact toolbar; icon-only below ~1500px so the repository name and branch stay readable */
+.toolbar .btn { padding: 5px 7px; }
+.toolbar .tool-group { padding: 0 4px; }
+.toolbar-host { container-type: inline-size; display: block; }
+@container (max-width: 1500px) { .toolbar .lbl { display: none; } .toolbar .btn { padding: 5px 8px; } }

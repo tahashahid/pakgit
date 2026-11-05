@@ -10,23 +10,23 @@ export function Toolbar(): JSX.Element {
   const disabled = !repo || !!busy
   const mac = window.pakgitMenu.platform === 'darwin'
   return (
-    <div className={`toolbar ${mac ? 'mac' : ''}`}>
+    <div className="toolbar-host"><div className={`toolbar ${mac ? 'mac' : ''}`}>
       <img src={logo} alt="PakGit" width={22} height={22} style={{ borderRadius: 5, margin: '0 6px 0 2px' }} />
       <div className="tool-group">
-        <Btn title="Open repository (Cmd/Ctrl+O)" onClick={() => a.openRepo()}><Icon name="folder" />Open</Btn>
-        <Btn title="Clone repository" onClick={() => a.clone()}>Clone</Btn>
+        <Btn title="Open repository (Cmd/Ctrl+O)" onClick={() => a.openRepo()}><Icon name="folder" /><span className="lbl">Open</span></Btn>
+        <Btn title="Clone repository" onClick={() => a.clone()}><Icon name="clone" /><span className="lbl">Clone</span></Btn>
       </div>
       <div className="tool-group">
-        <Btn title="Pull" disabled={disabled} onClick={() => a.pull()}><Icon name="pull" />Pull</Btn>
-        <Btn title="Push" disabled={disabled} onClick={() => a.push()}><Icon name="push" />Push{status && status.ahead > 0 ? <span className="badge">↑{status.ahead}</span> : null}</Btn>
-        <Btn title="Fetch" disabled={disabled} onClick={() => a.fetch()}><Icon name="fetch" />Fetch{status && status.behind > 0 ? <span className="badge">↓{status.behind}</span> : null}</Btn>
+        <Btn title="Pull" disabled={disabled} onClick={() => a.pull()}><Icon name="pull" /><span className="lbl">Pull</span></Btn>
+        <Btn title="Push" disabled={disabled} onClick={() => a.push()}><Icon name="push" /><span className="lbl">Push</span>{status && status.ahead > 0 ? <span className="badge">↑{status.ahead}</span> : null}</Btn>
+        <Btn title="Fetch" disabled={disabled} onClick={() => a.fetch()}><Icon name="fetch" /><span className="lbl">Fetch</span>{status && status.behind > 0 ? <span className="badge">↓{status.behind}</span> : null}</Btn>
       </div>
       <div className="tool-group">
-        <Btn title="Commit (Cmd/Ctrl+K)" disabled={disabled} onClick={() => a.focusCommit()}><Icon name="commit" />Commit</Btn>
-        <Btn title="Stash changes" disabled={disabled} onClick={() => a.stash()}><Icon name="stash" />Stash</Btn>
-        <Btn title="Add branch" disabled={disabled} onClick={() => a.addBranch()}><Icon name="branch" />Branch</Btn>
-        <Btn title="Merge" disabled={disabled} onClick={() => a.merge()}><Icon name="merge" />Merge</Btn>
-        <Btn title="Rebase" disabled={disabled} onClick={() => a.rebase()}><Icon name="rebase" />Rebase</Btn>
+        <Btn title="Commit (Cmd/Ctrl+K)" disabled={disabled} onClick={() => a.focusCommit()}><Icon name="commit" /><span className="lbl">Commit</span></Btn>
+        <Btn title="Stash changes" disabled={disabled} onClick={() => a.stash()}><Icon name="stash" /><span className="lbl">Stash</span></Btn>
+        <Btn title="Add branch" disabled={disabled} onClick={() => a.addBranch()}><Icon name="branch" /><span className="lbl">Branch</span></Btn>
+        <Btn title="Merge" disabled={disabled} onClick={() => a.merge()}><Icon name="merge" /><span className="lbl">Merge</span></Btn>
+        <Btn title="Rebase" disabled={disabled} onClick={() => a.rebase()}><Icon name="rebase" /><span className="lbl">Rebase</span></Btn>
       </div>
       <div className="tool-group">
         <Btn title="Refresh (F5)" disabled={!repo} onClick={() => void refresh()}><Icon name="refresh" /></Btn>
@@ -46,6 +46,6 @@ export function Toolbar(): JSX.Element {
       </div>
       <Btn small kind="ghost" title="Toggle theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></Btn>
       <Btn small kind="ghost" title="Settings (Cmd/Ctrl+,)" onClick={() => setShowSettings(true)}><Icon name="gear" /></Btn>
-    </div>
+    </div></div>
   )
 }
