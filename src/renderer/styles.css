@@ -20,6 +20,8 @@ pg-diff-view, pg-conflict-view, pg-blame-view, pg-diff-rows, pg-side-by-side { d
 pg-toolbar { display: block; }
 body { font: 13px/1.4 var(--sans); color: var(--fg1); background: var(--bg1); overflow: hidden; -webkit-font-smoothing: antialiased; }
 button, input, textarea, select { font: inherit; color: inherit; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+:root[data-theme="dark"] a { color: #7fb0ff; }
 ::-webkit-scrollbar { width: 10px; height: 10px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
 
 .app { display: flex; flex-direction: column; height: 100%; }
