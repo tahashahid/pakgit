@@ -212,3 +212,4 @@ pg-release { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .env-row input, .env-row select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg1); color: var(--fg1); min-width: 0; }
 .env-row .env-move { display: inline-flex; gap: 2px; }
 .env-chip { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg3); display: inline-flex; gap: 5px; align-items: center; }
+.field code { font-family: var(--mono); background: var(--bg3); padding: 0 4px; border-radius: 3px; user-select: all; }

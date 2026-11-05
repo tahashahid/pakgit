@@ -34,7 +34,8 @@ See [ANALYSIS.md](ANALYSIS.md) for the SmartGit feature analysis this design is 
 - Repository groups; branches and tags shown as folders by `/` prefix
 - Repository menu: apply patch, clean working tree
 - **Settings**: git executable, default pull strategy, background fetch interval, log size,
-  discard confirmation, theme, issue tracker (Linear API key and status mapping)
+  discard confirmation, theme, issue tracker (Linear: sign in with the browser via OAuth + PKCE,
+  or a personal API key; tokens stored encrypted with the OS keychain)
 - Three perspectives (Standard, Log, Working Tree), light and dark theme, resizable panes with
   persisted sizes, automatic refresh on working-tree changes (chokidar)
 
@@ -52,6 +53,18 @@ one component at a time:
 | `src/renderer/src/lib/actions.ts` (hook) | `src/renderer/app/actions.service.ts` (service) |
 | `src/renderer/src/components/*.tsx` | `src/renderer/app/panels/*.ts`, `app/ui/*.ts` |
 | electron-vite builds the renderer | Angular CLI builds it (`angular.json`), electron-vite builds main + preload |
+
+## Connecting Linear
+
+PakGit talks to Linear directly. Two options in Settings ▸ Issue tracker:
+
+1. **Sign in with Linear** (recommended). Someone in the workspace creates an OAuth application
+   once in Linear ▸ Settings ▸ API ▸ OAuth applications with the callback URL
+   `http://localhost:48422/callback`. Everyone then pastes its *client ID* into PakGit and clicks
+   **Sign in with Linear**; the browser opens, you approve, and PakGit stores the token
+   encrypted and refreshes it automatically. The client ID is not secret; PKCE is used, so no
+   client secret is needed.
+2. **Personal API key** from Linear ▸ Settings ▸ Security & access.
 
 ## Development
 

@@ -88,7 +88,8 @@ async function mergedInto(repo: string, ref: string | null): Promise<Set<string>
 export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   const cfg = await releaseConfig(repo)
   const refs: Record<string, string | null> = {}
-  await Promise.all(cfg.environments.map(async (e) => { refs[e.id] = await envRef(repo, cfg, e.branch) }))
+  const resolved = await Promise.all(cfg.environments.map((e) => envRef(repo, cfg, e.branch)))
+  cfg.environments.forEach((e, i) => { refs[e.id] = resolved[i] }) // config order, deterministic
   const last = lastEnv(cfg)
   const prod = refs[last.id]
   const t = tracker()

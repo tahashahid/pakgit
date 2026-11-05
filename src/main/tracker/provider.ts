@@ -3,6 +3,8 @@ import type { TrackerId, TrackerIssue, TrackerSettings, TrackerStatus } from '@s
 /** Pluggable issue-tracker provider. Implement this for Jira, GitHub Issues, etc. */
 export interface TrackerProvider {
   readonly id: TrackerId
+  /** called when the provider refreshed its tokens and they must be persisted */
+  onTokensChanged?: (patch: Partial<TrackerSettings>) => void
   /** matches issue keys inside branch names and commit messages (case-insensitive) */
   readonly keyPattern: RegExp
   configure(settings: TrackerSettings): void

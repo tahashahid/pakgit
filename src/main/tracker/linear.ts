@@ -2,25 +2,66 @@ import type { TrackerIssue, TrackerSettings, TrackerStatus } from '@shared/types
 import type { TrackerProvider } from './provider'
 
 const ENDPOINT = 'https://api.linear.app/graphql'
+export const LINEAR_AUTHORIZE_URL = 'https://linear.app/oauth/authorize'
+export const LINEAR_TOKEN_URL = 'https://api.linear.app/oauth/token'
+export const LINEAR_REVOKE_URL = 'https://api.linear.app/oauth/revoke'
 
 interface GqlIssue { identifier: string; title: string; url: string; branchName: string; state: { name: string; type: string }; assignee?: { name: string } | null }
 
 export class LinearProvider implements TrackerProvider {
   readonly id = 'linear' as const
   readonly keyPattern = /\b([A-Z][A-Z0-9]{1,9}-\d+)\b/i
-  private apiKey = ''
+  private settings: TrackerSettings | null = null
   private cache = new Map<string, TrackerIssue>()
   private stateCache = new Map<string, { id: string; name: string; type: string }[]>()
+  onTokensChanged?: (patch: Partial<TrackerSettings>) => void
+  private refreshing: Promise<void> | null = null
 
-  configure(s: TrackerSettings): void { if (s.linearApiKey !== this.apiKey) { this.apiKey = s.linearApiKey ?? ''; this.cache.clear(); this.stateCache.clear() } }
-  isConfigured(): boolean { return !!this.apiKey.trim() }
+  configure(s: TrackerSettings): void {
+    const prev = this.settings
+    this.settings = { ...s }
+    if (!prev || prev.authMethod !== s.authMethod || prev.linearApiKey !== s.linearApiKey || prev.linearAccessToken !== s.linearAccessToken) { this.cache.clear(); this.stateCache.clear() }
+  }
+  isConfigured(): boolean {
+    const s = this.settings; if (!s) return false
+    return s.authMethod === 'oauth' ? !!s.linearAccessToken : !!s.linearApiKey?.trim()
+  }
   normalizeKey(key: string): string { return key.toUpperCase() }
 
+  /** Authorization header: raw key for personal API keys, Bearer for OAuth tokens (refreshed when expiring). */
+  private async authHeader(): Promise<string> {
+    const s = this.settings
+    if (!s) throw new Error('Linear is not configured')
+    if (s.authMethod !== 'oauth') {
+      if (!s.linearApiKey?.trim()) throw new Error('Linear API key is not set (Settings ▸ Issue tracker)')
+      return s.linearApiKey.trim()
+    }
+    if (!s.linearAccessToken) throw new Error('Not signed in to Linear (Settings ▸ Issue tracker ▸ Sign in)')
+    if (s.linearTokenExpiry && Date.now() > s.linearTokenExpiry - 5 * 60_000 && s.linearRefreshToken) await this.refresh()
+    return `Bearer ${this.settings!.linearAccessToken}`
+  }
+
+  private async refresh(): Promise<void> {
+    if (this.refreshing) return this.refreshing
+    this.refreshing = (async () => {
+      const s = this.settings!
+      const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: s.linearRefreshToken, client_id: s.linearClientId })
+      if (s.linearClientSecret) body.set('client_secret', s.linearClientSecret)
+      const res = await fetch(LINEAR_TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
+      const json = (await res.json()) as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string; error_description?: string }
+      if (!res.ok || !json.access_token) throw new Error(`Linear token refresh failed: ${json.error_description || json.error || res.status}. Sign in again.`)
+      const patch: Partial<TrackerSettings> = { linearAccessToken: json.access_token, linearRefreshToken: json.refresh_token ?? s.linearRefreshToken, linearTokenExpiry: Date.now() + (json.expires_in ?? 86400) * 1000 }
+      this.settings = { ...s, ...patch }
+      this.onTokensChanged?.(patch)
+    })().finally(() => { this.refreshing = null })
+    return this.refreshing
+  }
+
   private async gql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-    if (!this.isConfigured()) throw new Error('Linear API key is not set (Settings ▸ Issue tracker)')
+    const auth = await this.authHeader()
     const res = await fetch(ENDPOINT, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: this.apiKey.trim() },
+      headers: { 'Content-Type': 'application/json', Authorization: auth },
       body: JSON.stringify({ query, variables })
     })
     const json = (await res.json()) as { data?: T; errors?: { message: string }[] }

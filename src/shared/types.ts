@@ -240,10 +240,22 @@ export interface TrackerStatus {
 
 export interface TrackerSettings {
   provider: TrackerId
+  /** 'oauth' = sign in with the browser (recommended), 'apiKey' = personal API key */
+  authMethod: 'oauth' | 'apiKey'
   linearApiKey: string
+  /** OAuth application (created once in Linear ▸ Settings ▸ API ▸ OAuth applications) */
+  linearClientId: string
+  /** optional with PKCE; only needed if the OAuth app requires it */
+  linearClientSecret: string
+  /** tokens are stored encrypted by the main process; the renderer only sees whether they exist */
+  linearAccessToken: string
+  linearRefreshToken: string
+  linearTokenExpiry: number
   /** tracker state to set when starting work on an issue; empty = do not update */
   stateOnStart: string
 }
+
+export interface OAuthResult { ok: boolean; account?: string; error?: string }
 
 // ---------- release planning ----------
 
@@ -337,6 +349,11 @@ export interface ReleaseApi {
   enableRerere(repo: string): Promise<void>
 
   trackerStatus(): Promise<TrackerStatus>
+  /** opens the browser for the OAuth login and resolves when the callback arrives */
+  trackerLogin(): Promise<OAuthResult>
+  trackerLogout(): Promise<void>
+  /** the redirect URL that must be registered on the OAuth application */
+  trackerRedirectUrl(): Promise<string>
   trackerIssues(keys: string[]): Promise<TrackerIssue[]>
   trackerMyIssues(): Promise<TrackerIssue[]>
   trackerSetState(key: string, stateName: string): Promise<void>

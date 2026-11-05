@@ -199,5 +199,5 @@ export class Store {
   prompt(spec: DialogSpec): Promise<DialogResult> {
     return new Promise((resolve) => this.dialog.set({ spec, resolve: (v) => { this.dialog.set(null); resolve(v) } }))
   }
-  async saveSettings(s: Settings): Promise<void> { this.settings.set(await this.api.saveSettings(s)); this.toast('success', 'Settings saved') }
+  async saveSettings(s: Settings, quiet = false): Promise<void> { this.settings.set(await this.api.saveSettings(s)); if (!quiet) this.toast('success', 'Settings saved') }
 }

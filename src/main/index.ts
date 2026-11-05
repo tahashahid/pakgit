@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeTheme } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeTheme, safeStorage } from 'electron'
 import { join, basename, dirname } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { spawn } from 'child_process'
@@ -6,6 +6,7 @@ import chokidar, { FSWatcher } from 'chokidar'
 import * as git from './git'
 import * as release from './release'
 import { configureTracker, tracker } from './tracker'
+import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
 import type { CommitOptions, DiffRequest, FileArea, RepoEntry } from '@shared/types'
 
 // ---------- repository registry ----------
@@ -42,18 +43,45 @@ import type { Settings } from '@shared/types'
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
 const defaultSettings: Settings = {
   gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true,
-  tracker: { provider: 'none', linearApiKey: '', stateOnStart: 'In Progress' }
+  tracker: { provider: 'none', authMethod: 'oauth', linearApiKey: '', linearClientId: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0, stateOnStart: 'In Progress' }
 }
+// Secrets are encrypted at rest with the OS keychain when available (Electron safeStorage).
+const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken'] as const
+const enc = (v: string): string => (v && safeStorage.isEncryptionAvailable() ? 'enc:' + safeStorage.encryptString(v).toString('base64') : v)
+const dec = (v: string): string => { try { return v?.startsWith('enc:') && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(v.slice(4), 'base64')) : v ?? '' } catch { return '' } }
 function loadSettings(): Settings {
-  try { const s = JSON.parse(readFileSync(settingsFile(), 'utf8')); return { ...defaultSettings, ...s, tracker: { ...defaultSettings.tracker, ...(s.tracker ?? {}) } } } catch { return { ...defaultSettings } }
+  try {
+    const s = JSON.parse(readFileSync(settingsFile(), 'utf8'))
+    const tracker = { ...defaultSettings.tracker, ...(s.tracker ?? {}) } as Settings['tracker']
+    for (const f of SECRET_FIELDS) tracker[f] = dec(tracker[f])
+    return { ...defaultSettings, ...s, tracker }
+  } catch { return { ...defaultSettings } }
+}
+function writeSettings(merged: Settings): void {
+  mkdirSync(dirname(settingsFile()), { recursive: true })
+  const onDisk = { ...merged, tracker: { ...merged.tracker } }
+  for (const f of SECRET_FIELDS) onDisk.tracker[f] = enc(onDisk.tracker[f])
+  writeFileSync(settingsFile(), JSON.stringify(onDisk, null, 2))
+}
+/** The renderer never receives token values, only whether they exist. */
+function publicSettings(s: Settings): Settings {
+  return { ...s, tracker: { ...s.tracker, linearAccessToken: s.tracker.linearAccessToken ? '***' : '', linearRefreshToken: s.tracker.linearRefreshToken ? '***' : '' } }
 }
 function saveSettings(s: Settings): Settings {
-  mkdirSync(dirname(settingsFile()), { recursive: true })
-  const merged = { ...defaultSettings, ...s, tracker: { ...defaultSettings.tracker, ...(s.tracker ?? {}) } }
-  writeFileSync(settingsFile(), JSON.stringify(merged, null, 2))
+  const current = loadSettings()
+  const tracker = { ...defaultSettings.tracker, ...(s.tracker ?? {}) } as Settings['tracker']
+  // keep stored tokens unless the renderer explicitly clears them
+  if (tracker.linearAccessToken === '***') tracker.linearAccessToken = current.tracker.linearAccessToken
+  if (tracker.linearRefreshToken === '***') tracker.linearRefreshToken = current.tracker.linearRefreshToken
+  if (!tracker.linearAccessToken) tracker.linearTokenExpiry = 0
+  const merged = { ...defaultSettings, ...s, tracker }
+  writeSettings(merged)
   git.setGitExecutable(merged.gitPath)
-  configureTracker(merged.tracker)
-  return merged
+  configureTracker(merged.tracker, persistTokens)
+  return publicSettings(merged)
+}
+function persistTokens(patch: Partial<Settings['tracker']>): void {
+  const s = loadSettings(); s.tracker = { ...s.tracker, ...patch }; writeSettings(s)
 }
 
 // ---------- file watching ----------
@@ -323,8 +351,26 @@ function registerIpc(): void {
   handle('tracker:myIssues', () => tracker().myActiveIssues())
   handle('tracker:setState', (key: string, state: string) => tracker().setState(key, state))
   handle('tracker:states', (key: string) => tracker().states(key))
-  handle('settings:get', () => loadSettings())
+  handle('settings:get', () => publicSettings(loadSettings()))
   handle('settings:save', (s: Settings) => saveSettings(s))
+  handle('tracker:login', async () => {
+    const s = loadSettings()
+    try {
+      const patch = await linearLogin(s.tracker)
+      persistTokens({ ...patch, authMethod: 'oauth' })
+      configureTracker(loadSettings().tracker, persistTokens)
+      const st = await tracker().status()
+      for (const w of BrowserWindow.getAllWindows()) { w.show(); w.focus() }
+      return { ok: !st.error, account: st.account, error: st.error }
+    } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) } }
+  })
+  handle('tracker:logout', async () => {
+    const s = loadSettings()
+    await linearLogout(s.tracker)
+    persistTokens({ linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0 })
+    configureTracker(loadSettings().tracker, persistTokens)
+  })
+  handle('tracker:redirectUrl', () => OAUTH_REDIRECT)
   handle('git:applyPatch', (repo: string, patch: string, o: { cached: boolean; reverse?: boolean }) => git.applyPatch(repo, patch, o))
   handle('git:resolveConflict', (repo: string, path: string, side: 'ours' | 'theirs') => git.resolveConflict(repo, path, side))
   handle('git:markResolved', (repo: string, paths: string[]) => git.markResolved(repo, paths))
@@ -352,7 +398,7 @@ function registerIpc(): void {
 app.whenReady().then(() => {
   git.setLogSink((line) => broadcast('git:log', line))
   git.setGitExecutable(loadSettings().gitPath)
-  configureTracker(loadSettings().tracker)
+  configureTracker(loadSettings().tracker, persistTokens)
   release.setReleaseConfigDir(app.getPath('userData'))
   registerIpc()
   buildMenu()
