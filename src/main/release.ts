@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import * as git from './git'
 import { tracker } from './tracker'
-import type { Commit, EnvConfig, PromoteResult, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
+import type { Commit, EnvConfig, Environment, PromoteResult, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
 
 // ---------- per-repository environment configuration ----------
 
@@ -12,22 +12,56 @@ export function setReleaseConfigDir(dir: string): void { configDir = dir }
 const cfgFile = () => join(configDir || process.cwd(), 'release-config.json')
 function loadAll(): Record<string, EnvConfig> { try { return JSON.parse(readFileSync(cfgFile(), 'utf8')) } catch { return {} } }
 
-const DEV = ['dev', 'develop', 'development'], STAGE = ['stage', 'staging', 'uat'], PROD = ['main', 'master', 'prod', 'production']
+const DEV = ['dev', 'develop', 'development'], STAGE = ['stage', 'staging', 'uat', 'qa'], PROD = ['main', 'master', 'prod', 'production']
+
+/** Detect a sensible default pipeline from the branches that exist. */
+export async function detectConfig(repo: string): Promise<EnvConfig> {
+  const refs = await git.refs(repo)
+  const names = new Set(refs.branches.map((b) => b.name))
+  const remote = refs.remotes.find((r) => r.name === 'origin')?.name ?? refs.remotes[0]?.name ?? 'origin'
+  const envs: Environment[] = []
+  const dev = DEV.find((c) => names.has(c)); if (dev) envs.push({ id: 'dev', name: 'Development', branch: dev, strategy: 'merge', trackerState: 'QA' })
+  const stage = STAGE.find((c) => names.has(c)); if (stage) envs.push({ id: 'stage', name: 'Staging', branch: stage, strategy: 'merge', trackerState: 'UAT' })
+  const prod = PROD.find((c) => names.has(c)) ?? 'main'
+  envs.push({ id: 'prod', name: 'Production', branch: prod, strategy: envs.length ? 'release-branch' : 'merge', trackerState: 'Done' })
+  return { remote, environments: envs, baseEnv: 'prod', releasePrefix: 'release/', backMerge: true }
+}
+
+/** Upgrade a config saved by an earlier version (fixed dev/stage/prod fields). */
+function migrate(raw: Record<string, unknown>): EnvConfig | null {
+  if (Array.isArray(raw['environments'])) return raw as unknown as EnvConfig
+  if (typeof raw['prod'] === 'string') {
+    const envs: Environment[] = []
+    if (raw['dev']) envs.push({ id: 'dev', name: 'Development', branch: String(raw['dev']), strategy: 'merge', trackerState: 'QA' })
+    if (raw['stage']) envs.push({ id: 'stage', name: 'Staging', branch: String(raw['stage']), strategy: 'merge', trackerState: 'UAT' })
+    envs.push({ id: 'prod', name: 'Production', branch: String(raw['prod']), strategy: 'release-branch', trackerState: 'Done' })
+    return { remote: String(raw['remote'] ?? 'origin'), environments: envs, baseEnv: 'prod', releasePrefix: String(raw['releasePrefix'] ?? 'release/'), backMerge: true }
+  }
+  return null
+}
 
 export async function releaseConfig(repo: string): Promise<EnvConfig> {
   const saved = loadAll()[repo]
-  if (saved) return saved
-  const refs = await git.refs(repo)
-  const names = new Set(refs.branches.map((b) => b.name))
-  const pick = (cands: string[]) => cands.find((c) => names.has(c)) ?? cands[0]
-  const remote = refs.remotes.find((r) => r.name === 'origin')?.name ?? refs.remotes[0]?.name ?? 'origin'
-  return { remote, dev: pick(DEV), stage: pick(STAGE), prod: pick(PROD), releasePrefix: 'release/' }
+  const migrated = saved ? migrate(saved as unknown as Record<string, unknown>) : null
+  if (migrated && migrated.environments.length) return migrated
+  return detectConfig(repo)
 }
 export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
+  if (!cfg.environments.length) throw new Error('At least one environment is required')
+  const ids = new Set<string>()
+  for (const e of cfg.environments) {
+    e.id = (e.id || e.name || e.branch).toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    if (!e.branch.trim()) throw new Error(`Environment "${e.name}" has no branch`)
+    if (ids.has(e.id)) throw new Error(`Duplicate environment id "${e.id}"`); ids.add(e.id)
+  }
+  if (!ids.has(cfg.baseEnv)) cfg.baseEnv = cfg.environments[cfg.environments.length - 1].id
   const all = loadAll(); all[repo] = cfg
   mkdirSync(dirname(cfgFile()), { recursive: true }); writeFileSync(cfgFile(), JSON.stringify(all, null, 2))
   return cfg
 }
+const envById = (cfg: EnvConfig, id: string): Environment => { const e = cfg.environments.find((x) => x.id === id); if (!e) throw new Error(`Unknown environment "${id}"`); return e }
+const lastEnv = (cfg: EnvConfig): Environment => cfg.environments[cfg.environments.length - 1]
+const baseBranch = (cfg: EnvConfig): string => envById(cfg, cfg.baseEnv).branch
 
 // ---------- analysis ----------
 
@@ -53,13 +87,16 @@ async function mergedInto(repo: string, ref: string | null): Promise<Set<string>
 
 export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   const cfg = await releaseConfig(repo)
-  const [dev, stage, prod] = await Promise.all([envRef(repo, cfg, cfg.dev), envRef(repo, cfg, cfg.stage), envRef(repo, cfg, cfg.prod)])
+  const refs: Record<string, string | null> = {}
+  await Promise.all(cfg.environments.map(async (e) => { refs[e.id] = await envRef(repo, cfg, e.branch) }))
+  const last = lastEnv(cfg)
+  const prod = refs[last.id]
   const t = tracker()
   const keyRe = new RegExp(t.keyPattern.source, 'gi')
 
   // all branches with sha + date
   const { stdout } = await run(repo, ['for-each-ref', '--format=%(refname:short)%00%(objectname)%00%(committerdate:iso-strict)', 'refs/heads', 'refs/remotes'])
-  const envNames = new Set([cfg.dev, cfg.stage, cfg.prod])
+  const envNames = new Set(cfg.environments.map((e) => e.branch))
   const all: ReleaseBranchRef[] = []
   const releaseBranches: ReleaseBranchRef[] = []
   for (const line of stdout.split('\n')) {
@@ -79,13 +116,15 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   const byName = new Map<string, ReleaseBranchRef>()
   for (const b of all) { const cur = byName.get(b.name); if (!cur || (!cur.remote && b.remote)) byName.set(b.name, b) }
 
-  const [inDev, inStage, inProd] = await Promise.all([mergedInto(repo, dev), mergedInto(repo, stage), mergedInto(repo, prod)])
+  const merged: Record<string, Set<string>> = {}
+  await Promise.all(cfg.environments.map(async (e) => { merged[e.id] = await mergedInto(repo, refs[e.id]) }))
+  const emptyEnv = (): Record<string, boolean> => Object.fromEntries(cfg.environments.map((e) => [e.id, false]))
 
   // group branches into items by issue key, else by normalised name (strip -dev/-stage/-main variants)
   const items = new Map<string, ReleaseItem>()
   const itemFor = (id: string, issueKey: string | null, name: string): ReleaseItem => {
     let it = items.get(id)
-    if (!it) { it = { id, issueKey, name, branches: [], inDev: false, inStage: false, inProd: false, commitsAheadOfProd: null, basedOnEnv: false, needsCherryPick: false, commits: [], lastActivity: '' }; items.set(id, it) }
+    if (!it) { it = { id, issueKey, name, branches: [], inEnv: emptyEnv(), commitsAheadOfProd: null, basedOnEnv: false, needsCherryPick: false, commits: [], lastActivity: '' }; items.set(id, it) }
     return it
   }
   for (const b of byName.values()) {
@@ -94,7 +133,7 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
     const issueKey = key ? t.normalizeKey(key) : null
     const it = itemFor(issueKey ?? base.toLowerCase(), issueKey, base)
     it.branches.push(b)
-    it.inDev ||= inDev.has(b.ref); it.inStage ||= inStage.has(b.ref); it.inProd ||= inProd.has(b.ref)
+    for (const e of cfg.environments) it.inEnv[e.id] ||= merged[e.id].has(b.ref)
     if (b.date > it.lastActivity) it.lastActivity = b.date
   }
 
@@ -107,24 +146,28 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
     const r = await run(repo, ['log', '--format=%H%x00%h%x00%P%x00%an%x00%ae%x00%aI%x00%s%x00%b%x00%D%x01', `${prod}..${ref}`, '-n', '2000'], true)
     if (r.code !== 0) return []
     return r.stdout.split('\x01').filter((c) => c.trim()).map((chunk) => {
-      const [sha, shortSha, parents, author, email, date, subject, body, refs] = chunk.replace(/^\n/, '').split('\0')
-      return { sha, shortSha, parents: parents ? parents.split(' ') : [], author, email, date, subject, body: (body ?? '').trim(), refs: refs ? refs.split(', ').filter(Boolean) : [] }
+      const [sha, shortSha, parents, author, email, date, subject, body, refsStr] = chunk.replace(/^\n/, '').split('\0')
+      return { sha, shortSha, parents: parents ? parents.split(' ') : [], author, email, date, subject, body: (body ?? '').trim(), refs: refsStr ? refsStr.split(', ').filter(Boolean) : [] }
     })
   }
-  const [devCommits, stageCommits] = await Promise.all([envLog(dev), envLog(stage)])
-  const stageShas = new Set(stageCommits.map((c) => c.sha))
+  const earlier = cfg.environments.slice(0, -1)
+  const logs: Record<string, Commit[]> = {}
+  await Promise.all(earlier.map(async (e) => { logs[e.id] = await envLog(refs[e.id]) }))
+  const shaSets: Record<string, Set<string>> = Object.fromEntries(earlier.map((e) => [e.id, new Set(logs[e.id].map((c) => c.sha))]))
   const seen = new Set<string>()
-  for (const c of [...stageCommits, ...devCommits]) {
-    if (seen.has(c.sha)) continue; seen.add(c.sha)
-    const key = `${c.subject}\n${c.body}`.match(keyRe)?.[0]
-    if (!key) continue
-    const k = t.normalizeKey(key)
-    if (knownPrefixes.size && !knownPrefixes.has(k.split('-')[0]) && !items.has(k)) continue
-    const it = itemFor(k, k, k)
-    it.commits.push(c)
-    if (stageShas.has(c.sha)) it.inStage = true
-    it.inDev = it.inDev || devCommits.some((d) => d.sha === c.sha)
-    if (c.date > it.lastActivity) it.lastActivity = c.date
+  // walk from the most stable earlier environment down so an item's commits are listed once
+  for (const e of [...earlier].reverse()) {
+    for (const c of logs[e.id]) {
+      if (seen.has(c.sha)) continue; seen.add(c.sha)
+      const key = `${c.subject}\n${c.body}`.match(keyRe)?.[0]
+      if (!key) continue
+      const k = t.normalizeKey(key)
+      if (knownPrefixes.size && !knownPrefixes.has(k.split('-')[0]) && !items.has(k)) continue
+      const it = itemFor(k, k, k)
+      it.commits.push(c)
+      for (const e2 of earlier) if (shaSets[e2.id].has(c.sha)) it.inEnv[e2.id] = true
+      if (c.date > it.lastActivity) it.lastActivity = c.date
+    }
   }
   for (const it of items.values()) {
     if (!it.branches.length) it.needsCherryPick = true
@@ -133,7 +176,7 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   }
 
   // per-branch own-commit counts for unreleased items; pick a branch cut from prod over a -dev copy when promoting
-  const unreleased = [...items.values()].filter((it) => !it.inProd && it.branches.length).slice(0, 150)
+  const unreleased = [...items.values()].filter((it) => !it.inEnv[last.id] && it.branches.length).slice(0, 150)
   await Promise.all(unreleased.map(async (it) => {
     if (!prod) return
     await Promise.all(it.branches.map(async (b) => {
@@ -159,7 +202,7 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   const head = await run(repo, ['rev-parse', '--abbrev-ref', 'HEAD'], true)
   const rerere = (await run(repo, ['config', '--get', 'rerere.enabled'], true)).stdout.trim() === 'true'
   const list = [...items.values()].sort((a, b) => (a.lastActivity < b.lastActivity ? 1 : -1))
-  return { config: cfg, refs: { dev, stage, prod }, items: list, releaseBranches: releaseBranches.sort((a, b) => (a.date > b.date ? -1 : 1)), currentBranch: head.code === 0 ? head.stdout.trim() : null, rerere }
+  return { config: cfg, refs, items: list, releaseBranches: releaseBranches.sort((a, b) => (a.date > b.date ? -1 : 1)), currentBranch: head.code === 0 ? head.stdout.trim() : null, rerere }
 }
 
 // ---------- operations ----------
@@ -202,22 +245,24 @@ async function applyItems(repo: string, items: PromoteInput[], target: string): 
   return res
 }
 
-export async function promote(repo: string, env: 'dev' | 'stage', items: PromoteInput[], push: boolean): Promise<PromoteResult> {
+export async function promote(repo: string, envId: string, items: PromoteInput[], push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
-  const target = cfg[env]
-  await checkoutEnv(repo, cfg, target)
-  const res = await applyItems(repo, items, target)
-  if (!res.conflict && push && res.merged.length) await run(repo, ['push', cfg.remote, target])
-  res.message ||= res.merged.length ? `Merged ${res.merged.length} item(s) into ${target}${push ? ' and pushed' : ''}` : 'Nothing to merge'
+  const env = envById(cfg, envId)
+  await checkoutEnv(repo, cfg, env.branch)
+  const res = await applyItems(repo, items, env.branch)
+  if (!res.conflict && push && res.merged.length) await run(repo, ['push', cfg.remote, env.branch])
+  res.message ||= res.merged.length ? `Merged ${res.merged.length} item(s) into ${env.branch}${push ? ' and pushed' : ''}` : 'Nothing to merge'
   return res
 }
 
-export async function startRelease(repo: string, name: string, items: PromoteInput[], push: boolean): Promise<PromoteResult> {
+export async function startRelease(repo: string, envId: string, name: string, items: PromoteInput[], push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
+  envById(cfg, envId) // validates
   const branch = name.startsWith(cfg.releasePrefix) ? name : cfg.releasePrefix + name
   const st = await git.status(repo)
   if (st.files.some((f) => f.area !== 'untracked')) throw new Error('Working tree has uncommitted changes. Commit or stash them first.')
-  const base = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${cfg.prod}`], true)).code === 0 ? `${cfg.remote}/${cfg.prod}` : cfg.prod
+  const baseName = baseBranch(cfg)
+  const base = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${baseName}`], true)).code === 0 ? `${cfg.remote}/${baseName}` : baseName
   await run(repo, ['checkout', '-b', branch, base])
   const res = await applyItems(repo, items, branch)
   if (!res.conflict && push) await run(repo, ['push', '-u', cfg.remote, branch])
@@ -225,38 +270,44 @@ export async function startRelease(repo: string, name: string, items: PromoteInp
   return res
 }
 
-/** Merge the release branch into prod, tag, then back-merge prod -> stage -> dev. */
-export async function finishRelease(repo: string, releaseBranch: string, tag: string | null, push: boolean): Promise<PromoteResult> {
+/** Merge the release branch into the environment, tag, then back-merge into the earlier environments. */
+export async function finishRelease(repo: string, envId: string, releaseBranch: string, tag: string | null, push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
-  await checkoutEnv(repo, cfg, cfg.prod)
+  const env = envById(cfg, envId)
+  await checkoutEnv(repo, cfg, env.branch)
   const r = await git.run(['merge', '--no-ff', '--no-edit', releaseBranch], { cwd: repo, allowFail: true, env: { GIT_EDITOR: 'true' } })
   if (r.code !== 0) return { merged: [], conflict: releaseBranch, skipped: [], message: r.stderr || r.stdout }
   if (tag) await run(repo, ['tag', '-a', tag, '-m', `Release ${tag}`])
-  const res = await backMerge(repo, cfg, push)
-  if (push && !res.conflict) await run(repo, ['push', cfg.remote, cfg.prod, ...(tag ? [tag] : [])])
+  if (push) await run(repo, ['push', cfg.remote, env.branch, ...(tag ? [tag] : [])])
+  const res = cfg.backMerge ? await backMerge(repo, cfg, env, push) : { merged: [], conflict: null, skipped: [], message: '' }
   res.merged.unshift(releaseBranch)
-  res.message = res.conflict ? res.message : `Released ${releaseBranch} into ${cfg.prod}${tag ? ` (tag ${tag})` : ''}, back-merged into ${cfg.stage} and ${cfg.dev}${push ? ', pushed' : ''}`
+  const earlier = cfg.environments.slice(0, cfg.environments.indexOf(env)).map((e) => e.branch)
+  res.message = res.conflict ? res.message : `Released ${releaseBranch} into ${env.branch}${tag ? ` (tag ${tag})` : ''}${earlier.length && cfg.backMerge ? `, back-merged into ${earlier.join(', ')}` : ''}${push ? ', pushed' : ''}`
   return res
 }
 
-async function backMerge(repo: string, cfg: EnvConfig, push: boolean): Promise<PromoteResult> {
+/** Merge `from` into each environment before it, most stable first (prod -> stage -> dev). */
+async function backMerge(repo: string, cfg: EnvConfig, from: Environment, push: boolean): Promise<PromoteResult> {
   const res: PromoteResult = { merged: [], conflict: null, skipped: [], message: '' }
-  const chain: [string, string][] = [[cfg.prod, cfg.stage], [cfg.stage, cfg.dev]]
-  for (const [from, to] of chain) {
+  const idx = cfg.environments.indexOf(from)
+  let source = from.branch
+  for (let i = idx - 1; i >= 0; i--) {
+    const to = cfg.environments[i].branch
     const exists = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${to}`], true)).code === 0 || (await run(repo, ['rev-parse', '--verify', '-q', `refs/heads/${to}`], true)).code === 0
     if (!exists) { res.skipped.push(to); continue }
     await checkoutEnv(repo, cfg, to)
-    const r = await git.run(['merge', '--no-ff', '--no-edit', '-m', `Merge ${from} into ${to}`, from], { cwd: repo, allowFail: true, env: { GIT_EDITOR: 'true' } })
-    if (r.code !== 0) { res.conflict = `${from} → ${to}`; res.message = r.stderr || r.stdout; return res }
-    res.merged.push(`${from} → ${to}`)
+    const r = await git.run(['merge', '--no-ff', '--no-edit', '-m', `Merge ${source} into ${to}`, source], { cwd: repo, allowFail: true, env: { GIT_EDITOR: 'true' } })
+    if (r.code !== 0) { res.conflict = `${source} → ${to}`; res.message = r.stderr || r.stdout; return res }
+    res.merged.push(`${source} → ${to}`)
     if (push) await run(repo, ['push', cfg.remote, to])
+    source = to
   }
   return res
 }
 
 export async function syncEnvironments(repo: string, push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
-  const res = await backMerge(repo, cfg, push)
+  const res = await backMerge(repo, cfg, lastEnv(cfg), push)
   res.message ||= res.merged.length ? `Synced: ${res.merged.join(', ')}${push ? ' (pushed)' : ''}` : 'Nothing to sync'
   return res
 }
@@ -264,6 +315,7 @@ export async function syncEnvironments(repo: string, push: boolean): Promise<Pro
 export async function startIssue(repo: string, branchName: string): Promise<void> {
   const cfg = await releaseConfig(repo)
   await run(repo, ['fetch', cfg.remote], true)
-  const base = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${cfg.prod}`], true)).code === 0 ? `${cfg.remote}/${cfg.prod}` : cfg.prod
+  const baseName = baseBranch(cfg)
+  const base = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${baseName}`], true)).code === 0 ? `${cfg.remote}/${baseName}` : baseName
   await run(repo, ['checkout', '-b', branchName, base])
 }

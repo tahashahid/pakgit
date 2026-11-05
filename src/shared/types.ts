@@ -241,21 +241,32 @@ export interface TrackerStatus {
 export interface TrackerSettings {
   provider: TrackerId
   linearApiKey: string
-  /** map of workflow events to tracker state names; empty = do not update */
-  stateOnDev: string
-  stateOnStage: string
-  stateOnRelease: string
+  /** tracker state to set when starting work on an issue; empty = do not update */
   stateOnStart: string
 }
 
 // ---------- release planning ----------
 
+/** One stage of the delivery pipeline, e.g. dev, staging, production. */
+export interface Environment {
+  id: string
+  name: string
+  branch: string
+  /** how work reaches this environment: merge feature branches directly, or collect them in a release branch first */
+  strategy: 'merge' | 'release-branch'
+  /** tracker state to set when work lands here; empty = do not update */
+  trackerState: string
+}
+
 export interface EnvConfig {
   remote: string
-  dev: string
-  stage: string
-  prod: string
+  /** ordered from first (least stable) to last (production) */
+  environments: Environment[]
+  /** id of the environment new feature branches are cut from (normally the last one) */
+  baseEnv: string
   releasePrefix: string
+  /** after a release lands in an environment, merge it back into every earlier environment */
+  backMerge: boolean
 }
 
 export interface ReleaseBranchRef {
@@ -278,9 +289,8 @@ export interface ReleaseItem {
   /** branch name without -dev/-stage/-main suffix */
   name: string
   branches: ReleaseBranchRef[]
-  inDev: boolean
-  inStage: boolean
-  inProd: boolean
+  /** environment id -> work is contained in that environment's branch */
+  inEnv: Record<string, boolean>
   /** the branch's own commits not yet on prod (first-parent, no merges); null when no branch exists */
   commitsAheadOfProd: number | null
   /** the branch was cut from an environment branch (dev/stage) and carries its history */
@@ -295,7 +305,8 @@ export interface ReleaseItem {
 
 export interface ReleaseAnalysis {
   config: EnvConfig
-  refs: { dev: string | null; stage: string | null; prod: string | null }
+  /** environment id -> resolved git ref (remote-tracking when available), null when the branch does not exist */
+  refs: Record<string, string | null>
   items: ReleaseItem[]
   releaseBranches: ReleaseBranchRef[]
   currentBranch: string | null
@@ -311,12 +322,16 @@ export interface PromoteResult {
 
 export interface ReleaseApi {
   releaseConfig(repo: string): Promise<EnvConfig>
+  detectReleaseConfig(repo: string): Promise<EnvConfig>
   saveReleaseConfig(repo: string, cfg: EnvConfig): Promise<EnvConfig>
   releaseAnalyze(repo: string): Promise<ReleaseAnalysis>
-  /** merge feature branches into an environment branch (stage or dev) */
-  promote(repo: string, env: 'dev' | 'stage', items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
-  startRelease(repo: string, name: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
-  finishRelease(repo: string, releaseBranch: string, tag: string | null, push: boolean): Promise<PromoteResult>
+  /** merge feature branches (or cherry-pick their commits) into an environment's branch */
+  promote(repo: string, envId: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
+  /** create a release branch from the base environment containing the given items (for environments using the release-branch strategy) */
+  startRelease(repo: string, envId: string, name: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
+  /** merge a release branch into an environment, tag, then back-merge into the earlier environments */
+  finishRelease(repo: string, envId: string, releaseBranch: string, tag: string | null, push: boolean): Promise<PromoteResult>
+  /** back-merge the last environment into every earlier one */
   syncEnvironments(repo: string, push: boolean): Promise<PromoteResult>
   startIssue(repo: string, key: string, branchName: string): Promise<void>
   enableRerere(repo: string): Promise<void>

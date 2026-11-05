@@ -42,7 +42,7 @@ import type { Settings } from '@shared/types'
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
 const defaultSettings: Settings = {
   gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true,
-  tracker: { provider: 'none', linearApiKey: '', stateOnStart: 'In Progress', stateOnDev: 'QA', stateOnStage: 'UAT', stateOnRelease: 'Done' }
+  tracker: { provider: 'none', linearApiKey: '', stateOnStart: 'In Progress' }
 }
 function loadSettings(): Settings {
   try { const s = JSON.parse(readFileSync(settingsFile(), 'utf8')); return { ...defaultSettings, ...s, tracker: { ...defaultSettings.tracker, ...(s.tracker ?? {}) } } } catch { return { ...defaultSettings } }
@@ -311,9 +311,10 @@ function registerIpc(): void {
   handle('release:config', (repo: string) => release.releaseConfig(repo))
   handle('release:saveConfig', (repo: string, cfg: Parameters<typeof release.saveReleaseConfig>[1]) => release.saveReleaseConfig(repo, cfg))
   handle('release:analyze', (repo: string) => release.analyze(repo))
-  handle('release:promote', (repo: string, env: 'dev' | 'stage', items: release.PromoteInput[], push: boolean) => release.promote(repo, env, items, push))
-  handle('release:start', (repo: string, name: string, items: release.PromoteInput[], push: boolean) => release.startRelease(repo, name, items, push))
-  handle('release:finish', (repo: string, branch: string, tag: string | null, push: boolean) => release.finishRelease(repo, branch, tag, push))
+  handle('release:promote', (repo: string, env: string, items: release.PromoteInput[], push: boolean) => release.promote(repo, env, items, push))
+  handle('release:start', (repo: string, env: string, name: string, items: release.PromoteInput[], push: boolean) => release.startRelease(repo, env, name, items, push))
+  handle('release:finish', (repo: string, env: string, branch: string, tag: string | null, push: boolean) => release.finishRelease(repo, env, branch, tag, push))
+  handle('release:detectConfig', (repo: string) => release.detectConfig(repo))
   handle('release:sync', (repo: string, push: boolean) => release.syncEnvironments(repo, push))
   handle('release:startIssue', (repo: string, _key: string, branchName: string) => release.startIssue(repo, branchName))
   handle('release:enableRerere', (repo: string) => release.enableRerere(repo))

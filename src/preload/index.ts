@@ -56,6 +56,7 @@ const api: PakGitApi = {
   revealInFinder: call('os:reveal'),
   gitVersion: call('git:version'),
   releaseConfig: call('release:config'),
+  detectReleaseConfig: call('release:detectConfig'),
   saveReleaseConfig: call('release:saveConfig'),
   releaseAnalyze: call('release:analyze'),
   promote: call('release:promote'),

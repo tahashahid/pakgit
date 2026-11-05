@@ -24,10 +24,7 @@ import type { Settings } from '@shared/types'
               <select [value]="s.tracker.provider" (change)="updT({ provider: $any($event.target).value })"><option value="none">None</option><option value="linear">Linear</option></select></label>
             @if (s.tracker.provider === 'linear') {
               <label class="field"><span>Linear personal API key (Settings ▸ Security &amp; access ▸ Personal API keys)</span><input type="password" [value]="s.tracker.linearApiKey" placeholder="lin_api_…" (input)="updT({ linearApiKey: $any($event.target).value })" /></label>
-              <label class="field"><span>State when starting work</span><input [value]="s.tracker.stateOnStart" (input)="updT({ stateOnStart: $any($event.target).value })" /></label>
-              <label class="field"><span>State when merged into dev</span><input [value]="s.tracker.stateOnDev" (input)="updT({ stateOnDev: $any($event.target).value })" /></label>
-              <label class="field"><span>State when merged into stage</span><input [value]="s.tracker.stateOnStage" (input)="updT({ stateOnStage: $any($event.target).value })" /></label>
-              <label class="field"><span>State when released</span><input [value]="s.tracker.stateOnRelease" (input)="updT({ stateOnRelease: $any($event.target).value })" /></label>
+              <label class="field"><span>State when starting work on an issue (per-environment states are set in Release ▸ Environments)</span><input [value]="s.tracker.stateOnStart" (input)="updT({ stateOnStart: $any($event.target).value })" /></label>
             }
           </div>
           <div class="modal-actions">

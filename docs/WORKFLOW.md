@@ -116,16 +116,35 @@ safe because every branch still exists.
 | Enable `git config rerere.enabled true` in every repository | Resolve a conflict once, reuse it in the next environment |
 | Do not reformat files or mass-rename in a feature branch | Formatting churn conflicts with everything |
 
+## Configuring the pipeline
+
+The environments are not fixed. In the Release view, **Configure…** opens the pipeline
+editor for the current repository:
+
+- an ordered list of environments, each with a display name, its branch, a promotion
+  strategy (**merge** feature branches straight in, or collect them in a **release branch**
+  that is finished into the environment later) and an optional tracker state to set when
+  work arrives there;
+- the remote, the release-branch prefix, which environment new feature branches are cut
+  from (normally production), and whether to back-merge after releases.
+
+PakGit detects a default from the branches that exist (`dev` → `stage` → `main`, or just
+`main`, etc.). Examples that work with the same view: `develop → main`,
+`dev → qa → uat → production`, or a single `main` with release branches. A work item is
+"ready" for an environment when it is contained in the previous one and not yet in that
+one; the tabs, columns, actions and the help text follow the configured pipeline.
+
 ## Linear status mapping used by PakGit
 
-| Event | Linear state |
+| Event | Linear state (default mapping) |
 |---|---|
-| Start work on issue | In Progress |
+| Start work on issue | In Progress (Settings ▸ Issue tracker) |
 | PR opened to `dev` | In Review (set manually when opening the PR) |
-| Merged into `dev` | QA |
-| Merged into `stage` | UAT |
+| Merged into `dev` | QA (per-environment, Configure…) |
+| Merged into `stage` | UAT (per-environment, Configure…) |
 | Approved for production | Ready To Deploy (set by the product team) |
-| Release merged into `main` | Done |
+| Release merged into `main` | Done (per-environment, Configure…) |
 
-Status updates are optional (toggle in the Release view). Other trackers (Jira, GitHub
+Status updates are optional (toggle in the Release view) and the state names are
+configurable per environment. Other trackers (Jira, GitHub
 Issues) plug into the same provider interface; Linear is the first implementation.

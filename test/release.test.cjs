@@ -26,13 +26,14 @@ const assert = require('assert')
   await g.checkout(repo, 'dev'); write('hotspot.txt', 'x\n'); await commit('fix: hotspot (CYB4-3)'); await g.push(repo, { remote: 'origin', branch: 'dev' })
 
   const cfg = await rel.releaseConfig(repo)
-  assert.deepEqual([cfg.dev, cfg.stage, cfg.prod, cfg.remote], ['dev', 'stage', 'main', 'origin'])
+  assert.deepEqual(cfg.environments.map((e) => [e.id, e.branch, e.strategy]), [['dev', 'dev', 'merge'], ['stage', 'stage', 'merge'], ['prod', 'main', 'release-branch']])
+  assert.equal(cfg.baseEnv, 'prod'); assert.equal(cfg.remote, 'origin')
   let a = await rel.analyze(repo)
   assert.deepEqual(a.refs, { dev: 'origin/dev', stage: 'origin/stage', prod: 'origin/main' })
   const byKey = Object.fromEntries(a.items.map((i) => [i.issueKey, i]))
-  assert.equal(byKey['CYB4-1'].inDev, true); assert.equal(byKey['CYB4-1'].inStage, true); assert.equal(byKey['CYB4-1'].inProd, false)
-  assert.equal(byKey['CYB4-2'].inStage, false); assert.equal(byKey['CYB4-2'].commitsAheadOfProd, 1)
-  assert.equal(byKey['CYB4-3'].needsCherryPick, true); assert.equal(byKey['CYB4-3'].inDev, true); assert.equal(byKey['CYB4-3'].commits.length, 1)
+  assert.deepEqual(byKey['CYB4-1'].inEnv, { dev: true, stage: true, prod: false })
+  assert.equal(byKey['CYB4-2'].inEnv.stage, false); assert.equal(byKey['CYB4-2'].commitsAheadOfProd, 1); assert.equal(byKey['CYB4-2'].basedOnEnv, false)
+  assert.equal(byKey['CYB4-3'].needsCherryPick, true); assert.equal(byKey['CYB4-3'].inEnv.dev, true); assert.equal(byKey['CYB4-3'].commits.length, 1)
   assert.equal(byKey['CYB4-1'].branches[0].ref, 'origin/taha/cyb4-1-login')
   const toItem = (it) => ({ id: it.id, ref: it.branches[0]?.ref ?? null, commits: it.commits.map((c) => c.sha) })
 
@@ -40,20 +41,20 @@ const assert = require('assert')
   let r = await rel.promote(repo, 'stage', [toItem(byKey['CYB4-2']), toItem(byKey['CYB4-3'])], true)
   assert.equal(r.conflict, null); assert.deepEqual(r.merged, ['CYB4-2', 'CYB4-3'])
   a = await rel.analyze(repo)
-  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-2').inStage, true)
-  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-3').inStage, true)
+  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-2').inEnv.stage, true)
+  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-3').inEnv.stage, true)
   // promoting again skips
   r = await rel.promote(repo, 'stage', [toItem(byKey['CYB4-2'])], false); assert.deepEqual(r.skipped, ['CYB4-2'])
 
   // release CYB4-1 only
-  r = await rel.startRelease(repo, '2026-W46', [toItem(byKey['CYB4-1'])], true)
+  r = await rel.startRelease(repo, 'prod', '2026-W46', [toItem(byKey['CYB4-1'])], true)
   assert.equal(r.conflict, null); assert.equal((await g.status(repo)).branch, 'release/2026-W46')
   assert(fs.existsSync(path.join(repo, 'login.txt')) && !fs.existsSync(path.join(repo, 'report.txt')), 'release contains only CYB4-1')
-  r = await rel.finishRelease(repo, 'release/2026-W46', 'v2026.46', true)
+  r = await rel.finishRelease(repo, 'prod', 'release/2026-W46', 'v2026.46', true)
   assert.equal(r.conflict, null, r.message); assert.deepEqual(r.merged, ['release/2026-W46', 'main → stage', 'stage → dev'])
   a = await rel.analyze(repo)
-  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-1').inProd, true)
-  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-2').inProd, false)
+  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-1').inEnv.prod, true)
+  assert.equal(a.items.find((i) => i.issueKey === 'CYB4-2').inEnv.prod, false)
   assert.equal((await g.refs(repo)).tags[0].name, 'v2026.46')
   // main is now an ancestor of dev and stage (no drift)
   assert.equal((await g.run(['merge-base', '--is-ancestor', 'main', 'dev'], { cwd: repo, allowFail: true })).code, 0)
@@ -64,6 +65,38 @@ const assert = require('assert')
   // start issue
   await rel.startIssue(repo, 'taha/cyb4-5-new'); assert.equal((await g.status(repo)).branch, 'taha/cyb4-5-new')
   await rel.enableRerere(repo); assert.equal((await rel.analyze(repo)).rerere, true)
+  // --- custom pipeline: 4 environments, custom ids, release branch into 'uat', base = prod
+  const custom = {
+    remote: 'origin', releasePrefix: 'rel/', backMerge: true, baseEnv: 'live',
+    environments: [
+      { id: 'dev', name: 'Dev', branch: 'dev', strategy: 'merge', trackerState: '' },
+      { id: 'qa', name: 'QA', branch: 'stage', strategy: 'merge', trackerState: '' },
+      { id: 'uat', name: 'UAT', branch: 'uat', strategy: 'release-branch', trackerState: '' },
+      { id: 'live', name: 'Live', branch: 'main', strategy: 'merge', trackerState: '' }
+    ]
+  }
+  rel.saveReleaseConfig(repo, custom)
+  await g.checkout(repo, 'main'); await g.createBranch(repo, 'uat', 'main'); await g.run(['push', 'origin', 'uat'], { cwd: repo })
+  a = await rel.analyze(repo)
+  assert.deepEqual(Object.keys(a.refs), ['dev', 'qa', 'uat', 'live']); assert.equal(a.refs.uat, 'origin/uat')
+  const two = a.items.find((i) => i.issueKey === 'CYB4-2')
+  assert.deepEqual(two.inEnv, { dev: true, qa: true, uat: false, live: false })
+  r = await rel.startRelease(repo, 'uat', 'u1', [toItem(two)], true); assert.equal((await g.status(repo)).branch, 'rel/u1')
+  r = await rel.finishRelease(repo, 'uat', 'rel/u1', null, true)
+  assert.equal(r.conflict, null, r.message); assert.deepEqual(r.merged, ['rel/u1', 'uat → stage', 'stage → dev'], 'back-merge walks the configured chain')
+  a = await rel.analyze(repo); assert.deepEqual(a.items.find((i) => i.issueKey === 'CYB4-2').inEnv, { dev: true, qa: true, uat: true, live: false })
+  // promote by plain merge into 'live' (strategy merge) and sync down from the last environment
+  r = await rel.promote(repo, 'live', [toItem(two)], true); assert.deepEqual(r.merged, ['CYB4-2'])
+  r = await rel.syncEnvironments(repo, true); assert.deepEqual(r.merged, ['main → uat', 'uat → stage', 'stage → dev'])
+  a = await rel.analyze(repo); assert.deepEqual(a.items.find((i) => i.issueKey === 'CYB4-2').inEnv, { dev: true, qa: true, uat: true, live: true })
+  // two-environment pipeline (dev -> main) and start-issue base env
+  rel.saveReleaseConfig(repo, { remote: 'origin', releasePrefix: 'release/', backMerge: false, baseEnv: 'dev', environments: [
+    { id: 'dev', name: 'Dev', branch: 'dev', strategy: 'merge', trackerState: '' }, { id: 'prod', name: 'Prod', branch: 'main', strategy: 'merge', trackerState: '' }] })
+  a = await rel.analyze(repo); assert.deepEqual(Object.keys(a.items[0].inEnv), ['dev', 'prod'])
+  await rel.startIssue(repo, 'from-dev'); assert.equal((await g.run(['merge-base', '--is-ancestor', 'origin/dev', 'from-dev'], { cwd: repo, allowFail: true })).code, 0, 'branch cut from configured base env')
+  // legacy config migrates
+  fs.writeFileSync(path.join(root, 'release-config.json'), JSON.stringify({ [repo]: { remote: 'origin', dev: 'dev', stage: 'stage', prod: 'main', releasePrefix: 'release/' } }))
+  const mig = await rel.releaseConfig(repo); assert.deepEqual(mig.environments.map((e) => e.id), ['dev', 'stage', 'prod']); assert.equal(mig.environments[2].strategy, 'release-branch')
   console.log('ALL RELEASE TESTS PASSED in', root)
   fs.rmSync(root, { recursive: true, force: true })
 })().catch((e) => { console.error('FAILED:', e); process.exit(1) })
