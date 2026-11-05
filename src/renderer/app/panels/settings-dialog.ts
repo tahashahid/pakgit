@@ -10,21 +10,21 @@ import type { Settings } from '@shared/types'
         <form class="modal wide" (mousedown)="$event.stopPropagation()" (submit)="$event.preventDefault(); save()">
           <h2>Settings</h2>
           <div class="settings-grid">
-            <label class="field"><span>Git executable (empty = auto-detect)</span><input [value]="s.gitPath" placeholder="git" (input)="upd({ gitPath: $any($event.target).value })" /></label>
+            <label class="field"><span>Git executable</span><input [value]="s.gitPath" placeholder="git" (input)="upd({ gitPath: $any($event.target).value })" /><small class="hint">Leave empty to auto-detect.</small></label>
             <label class="field"><span>Default pull strategy</span>
-              <select [value]="s.pullMode" (change)="upd({ pullMode: $any($event.target).value })"><option value="merge">merge</option><option value="rebase">rebase</option><option value="ff-only">fast-forward only</option></select></label>
-            <label class="field"><span>Background fetch every (minutes, 0 = off)</span><input type="number" min="0" [value]="s.autoFetchMinutes" (input)="upd({ autoFetchMinutes: num($event, 0) })" /></label>
-            <label class="field"><span>Commits to load in Log</span><input type="number" min="50" step="50" [value]="s.logLimit" (input)="upd({ logLimit: num($event, 400, 50) })" /></label>
+              <select (change)="upd({ pullMode: $any($event.target).value })"><option value="merge" [selected]="s.pullMode === 'merge'">merge</option><option value="rebase" [selected]="s.pullMode === 'rebase'">rebase</option><option value="ff-only" [selected]="s.pullMode === 'ff-only'">fast-forward only</option></select><small class="hint">Used when you pull from the toolbar.</small></label>
+            <label class="field"><span>Background fetch (minutes)</span><input type="number" min="0" [value]="s.autoFetchMinutes" (input)="upd({ autoFetchMinutes: num($event, 0) })" /><small class="hint">0 turns it off.</small></label>
+            <label class="field"><span>Commits to load in Log</span><input type="number" min="50" step="50" [value]="s.logLimit" (input)="upd({ logLimit: num($event, 400, 50) })" /><small class="hint">More can be loaded on demand.</small></label>
             <label class="field field-check"><input type="checkbox" [checked]="s.confirmDiscard" (change)="upd({ confirmDiscard: $any($event.target).checked })" /><span>Confirm before discarding changes</span></label>
             <label class="field field-check"><input type="checkbox" [checked]="store.theme() === 'dark'" (change)="store.toggleTheme()" /><span>Dark theme</span></label>
           </div>
           <h3 style="margin:8px 0 0;font-size:13px">Issue tracker</h3>
           <div class="settings-grid">
             <label class="field"><span>Provider</span>
-              <select [value]="s.tracker.provider" (change)="updT({ provider: $any($event.target).value })"><option value="none">None</option><option value="linear">Linear</option></select></label>
+              <select (change)="updT({ provider: $any($event.target).value })"><option value="none" [selected]="s.tracker.provider === 'none'">None</option><option value="linear" [selected]="s.tracker.provider === 'linear'">Linear</option></select><small class="hint">Shows issue titles and statuses in the Release view.</small></label>
             @if (s.tracker.provider === 'linear') {
-              <label class="field"><span>Linear personal API key (Settings ▸ Security &amp; access ▸ Personal API keys)</span><input type="password" [value]="s.tracker.linearApiKey" placeholder="lin_api_…" (input)="updT({ linearApiKey: $any($event.target).value })" /></label>
-              <label class="field"><span>State when starting work on an issue (per-environment states are set in Release ▸ Environments)</span><input [value]="s.tracker.stateOnStart" (input)="updT({ stateOnStart: $any($event.target).value })" /></label>
+              <label class="field"><span>Linear personal API key</span><input type="password" [value]="s.tracker.linearApiKey" placeholder="lin_api_…" (input)="updT({ linearApiKey: $any($event.target).value })" /><small class="hint">Linear ▸ Settings ▸ Security &amp; access ▸ Personal API keys. Sent only to api.linear.app.</small></label>
+              <label class="field"><span>State when starting work on an issue</span><input [value]="s.tracker.stateOnStart" placeholder="In Progress" (input)="updT({ stateOnStart: $any($event.target).value })" /><small class="hint">Per-environment states are set in Release ▸ Configure.</small></label>
             }
           </div>
           <div class="modal-actions">
