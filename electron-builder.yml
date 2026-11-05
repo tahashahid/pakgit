@@ -1,0 +1,24 @@
+appId: org.pakgit.app
+productName: PakGit
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - resources/**
+mac:
+  category: public.app-category.developer-tools
+  target: [dmg, zip]
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+win:
+  target: [nsis, portable]
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+linux:
+  target: [AppImage, deb, rpm]
+  category: Development
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
