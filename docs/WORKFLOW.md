@@ -69,31 +69,39 @@ subset of branches for any environment. A branch cut from `dev` drags every unre
 
 ### 3. Promote to `stage` (UAT)
 
-Only what QA approved goes to `stage`:
+Only what QA approved goes to `stage`, and nothing lands on an environment branch
+without a pull request:
 
-1. In PakGit's Release view, tab **To stage** lists everything that is on `dev` but
-   not on `stage`. Tick the items, click **Merge into stage**. PakGit merges each
-   feature branch (not `dev`) into `stage` with a merge commit and pushes.
-   By hand: `git switch stage && git pull --ff-only && git merge --no-ff origin/taha/cyb4-1234-…`.
-2. Linear: **UAT**.
+1. In PakGit's Release view, tab **To Staging** lists everything that is on `dev` but
+   not on `stage`. Tick the items and click **Create release branch + PR**. PakGit cuts
+   `release/stage-2026-W46` from `stage`, merges each selected feature branch (never
+   `dev` itself) into it, pushes it and opens the pull request **release/… → stage** in
+   your browser.
+   By hand: `git switch -c release/stage-2026-W46 origin/stage && git merge --no-ff origin/taha/cyb4-1234-…`.
+2. Review and merge the PR with a merge commit. Linear: **UAT**.
 
 ### 4. Release to production
 
-1. Tab **To production** lists what is on `stage` but not on `main`. Tick what the
+1. Tab **To Production** lists what is on `stage` but not on `main`. Tick what the
    product team approved (Linear **Ready To Deploy**) and click **Create release
-   branch**. PakGit creates `release/2026-W46` from `main` and merges the selected
-   feature branches into it.
-2. Open a PR **release/… → main**, run the final checks, merge with a merge commit,
-   tag (`v2026.46`).
-3. **Finish release** in PakGit (or by hand) merges `main` back into `stage` and then
-   `dev`, so the three branches never drift apart. This back-merge is what prevents
-   the next round of conflicts.
+   branch + PR**. PakGit cuts `release/main-2026-W46` from `main`, merges the selected
+   feature branches into it and opens the PR **release/… → main**.
+2. Run the final checks, merge the PR with a merge commit, tag (`v2026.46`).
+3. **Sync environments** in PakGit creates `sync/main-into-stage-…` and
+   `sync/main-into-dev-…` branches and opens their pull requests, so the three branches
+   never drift apart. This back-merge is what prevents the next round of conflicts.
 4. Linear: **Done**.
 
 ### 5. Hotfixes
 
-Branch from `main`, PR into `main`, then back-merge `main → stage → dev` (Release view
-▸ **Sync environments**). Never hotfix on `dev` or `stage` directly.
+Branch from `main`, PR into `main`, then **Sync environments** (PRs `main → stage`,
+`main → dev`). Never hotfix on `dev` or `stage` directly.
+
+### Direct merges
+
+Each environment's promotion strategy is configurable (Release ▸ Configure…):
+**feature PRs**, **release branch + PR** (the defaults above) or **direct merge**, which
+merges and pushes without a pull request for teams that want that.
 
 ### 6. Dropping work that will not ship
 
@@ -122,9 +130,10 @@ The environments are not fixed. In the Release view, **Configure…** opens the 
 editor for the current repository:
 
 - an ordered list of environments, each with a display name, its branch, a promotion
-  strategy (**merge** feature branches straight in, or collect them in a **release branch**
-  that is finished into the environment later) and an optional tracker state to set when
-  work arrives there;
+  strategy (**feature PRs**: one pull request per feature branch; **release branch + PR**:
+  the picked items are merged into a release branch cut from the environment and one
+  pull request is opened; **direct merge**: no pull request) and an optional tracker state
+  to set when work is promoted there;
 - the remote, the release-branch prefix, which environment new feature branches are cut
   from (normally production), and whether to back-merge after releases.
 

@@ -10,7 +10,7 @@ import type { EnvConfig, Environment } from '@shared/types'
       <div class="modal-backdrop" (mousedown)="closed.emit()">
         <form class="modal wide" (mousedown)="$event.stopPropagation()" (submit)="$event.preventDefault(); save()">
           <h2>Environments</h2>
-          <p class="modal-message">Order them from least stable (first) to production (last). Work is promoted one step at a time: an item is "ready" for an environment when it is in the previous one. <b>merge</b> merges feature branches straight into the environment branch; <b>release branch</b> collects the picked items in a release branch first, which you finish into the environment later.</p>
+          <p class="modal-message">Order them from least stable (first) to production (last). Work is promoted one step at a time: an item is "ready" for an environment when it is in the previous one. Promotion: <b>feature PRs</b> opens one pull request per feature branch; <b>release branch + PR</b> cuts a release branch from the environment, merges the picked items into it and opens one pull request; <b>direct merge</b> merges into the environment branch with no pull request.</p>
           <div class="env-list">
             <div class="env-row head"><span></span><span>Name</span><span>Branch</span><span>Promotion</span><span>Tracker state on arrival</span><span></span></div>
             @for (e of c.environments; track $index; let i = $index) {
@@ -18,7 +18,7 @@ import type { EnvConfig, Environment } from '@shared/types'
                 <span class="env-move"><button type="button" class="btn small" (click)="move(i, -1)" [disabled]="i === 0" title="Move up">↑</button><button type="button" class="btn small" (click)="move(i, 1)" [disabled]="i === c.environments.length - 1" title="Move down">↓</button></span>
                 <input [value]="e.name" placeholder="Staging" (input)="upd(i, { name: $any($event.target).value })" />
                 <input class="mono" [value]="e.branch" placeholder="staging" (input)="upd(i, { branch: $any($event.target).value })" />
-                <select (change)="upd(i, { strategy: $any($event.target).value })"><option value="merge" [selected]="e.strategy === 'merge'">merge</option><option value="release-branch" [selected]="e.strategy === 'release-branch'">release branch</option></select>
+                <select (change)="upd(i, { strategy: $any($event.target).value })"><option value="feature-pr" [selected]="e.strategy === 'feature-pr'">feature PRs</option><option value="release-branch" [selected]="e.strategy === 'release-branch'">release branch + PR</option><option value="merge" [selected]="e.strategy === 'merge'">direct merge</option></select>
                 <input [value]="e.trackerState" placeholder="e.g. UAT" (input)="upd(i, { trackerState: $any($event.target).value })" />
                 <button type="button" class="btn small danger" (click)="remove(i)" [disabled]="c.environments.length === 1" title="Remove">✕</button>
               </div>
@@ -64,7 +64,7 @@ export class EnvConfigDialog {
     })
   }
   move(i: number, d: -1 | 1): void { this.cfg.update((c) => { if (!c) return c; const envs = [...c.environments]; const j = i + d; if (j < 0 || j >= envs.length) return c; [envs[i], envs[j]] = [envs[j], envs[i]]; return { ...c, environments: envs } }) }
-  add(): void { this.cfg.update((c) => (c ? { ...c, environments: [...c.environments, { id: `env-${c.environments.length + 1}`, name: '', branch: '', strategy: 'merge', trackerState: '' }] } : c)) }
+  add(): void { this.cfg.update((c) => (c ? { ...c, environments: [...c.environments, { id: `env-${c.environments.length + 1}`, name: '', branch: '', strategy: 'release-branch', trackerState: '' }] } : c)) }
   remove(i: number): void { this.cfg.update((c) => (c ? { ...c, environments: c.environments.filter((_, k) => k !== i) } : c)) }
   async detect(): Promise<void> { const r = this.store.repo(); if (!r) return; this.cfg.set(await this.store.api.detectReleaseConfig(r.path)) }
   async save(): Promise<void> {

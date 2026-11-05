@@ -26,7 +26,7 @@ function isoWeek(d = new Date()): string {
     <div class="release">
       <div class="release-bar">
         <span class="muted">Pipeline</span>
-        @for (e of envs(); track e.id; let last = $last) { <span class="env-chip" [title]="e.strategy === 'release-branch' ? 'via release branch' : 'direct merge'">{{ e.name || e.branch }} <span class="mono muted">{{ e.branch }}</span></span>@if (!last) { <span class="muted">→</span> } }
+        @for (e of envs(); track e.id; let last = $last) { <span class="env-chip" [title]="e.strategy === 'release-branch' ? 'release branch + pull request' : e.strategy === 'feature-pr' ? 'one pull request per feature branch' : 'direct merge, no pull request'">{{ e.name || e.branch }} <span class="mono muted">{{ e.branch }}</span></span>@if (!last) { <span class="muted">→</span> } }
         <button class="btn small" (click)="showConfig.set(true)" title="Configure environments, branches and promotion strategy">Configure…</button>
         <button class="btn small" title="Fetch all remotes, then re-analyse" (click)="fetchAndAnalyze()" [disabled]="store.releaseLoading()"><pg-icon name="fetch" [size]="14" />Fetch</button>
         <button class="btn small" title="Re-analyse" (click)="store.analyzeRelease()" [disabled]="store.releaseLoading()"><pg-icon name="refresh" [size]="14" /></button>
@@ -49,9 +49,9 @@ function isoWeek(d = new Date()): string {
             <li><b>Start</b>: "Start work on issue…" creates the branch from <code>{{ baseEnv()?.branch }}</code>{{ store.settings()?.tracker?.stateOnStart ? ' (tracker → ' + store.settings()!.tracker.stateOnStart + ')' : '' }}.</li>
             @for (e of envs(); track e.id; let i = $index; let first = $first) {
               <li><b>{{ e.name || e.branch }}</b> (<code>{{ e.branch }}</code>):
-                @if (first) { open a PR for the feature branch, merge with a merge commit (no squash). Resolve conflicts once; rerere replays them later. }
-                @else if (e.strategy === 'merge') { tab <i>To {{ e.name || e.branch }}</i> lists what is in {{ envs()[i - 1].name || envs()[i - 1].branch }} but not here; tick items and "Merge into {{ e.branch }}". Only those branches move. }
-                @else { tab <i>To {{ e.name || e.branch }}</i>: tick approved items, "Create release branch", review/PR it, then "Finish release" merges it into <code>{{ e.branch }}</code>, tags it{{ cfg()?.backMerge ? ' and back-merges into the earlier environments' : '' }}. }
+                @if (e.strategy === 'feature-pr') { tab <i>To {{ e.name || e.branch }}</i>: tick items and "Open pull requests" opens one PR per feature branch into <code>{{ e.branch }}</code>. Merge with a merge commit (no squash). Resolve conflicts once; rerere replays them later. }
+                @else if (e.strategy === 'release-branch') { tab <i>To {{ e.name || e.branch }}</i>: tick approved items and "Create release branch". PakGit cuts <code>{{ cfg()?.releasePrefix }}…</code> from <code>{{ e.branch }}</code>, merges only those branches into it, pushes, and opens the pull request into <code>{{ e.branch }}</code>. Merge the PR on your hosting provider{{ cfg()?.backMerge ? ', then "Sync environments" opens the back-merge PRs' : '' }}. }
+                @else { tab <i>To {{ e.name || e.branch }}</i>: tick items and "Merge into {{ e.branch }}" merges the feature branches directly (no pull request). }
                 {{ e.trackerState ? '(tracker → ' + e.trackerState + ')' : '' }}
               </li>
             }
@@ -64,7 +64,7 @@ function isoWeek(d = new Date()): string {
       @if (!store.release() && store.releaseLoading()) { <div class="empty"><span class="spinner"></span> Analysing branches…</div> }
       @else if (store.release(); as r) {
         @for (e of envs(); track e.id) { @if (!r.refs[e.id]) { <div class="state-banner">Branch "{{ e.branch }}" for {{ e.name || e.id }} was not found. Fetch, or fix it under Configure.</div> } }
-        <pg-split dir="h" [initial]="860" storageKey="release-main" [min]="400">
+        <pg-split dir="h" [initial]="860" storageKey="release-main" [min]="420" [minSecond]="240">
           <pg-panel first [title]="'Release planning'">
             <ng-container actions>
               @for (e of envs(); track e.id) { <button class="btn small" [class.active]="tab() === e.id" (click)="tab.set(e.id)">To {{ e.name || e.branch }} <span class="badge">{{ counts()[e.id] }}</span></button> }
@@ -85,8 +85,8 @@ function isoWeek(d = new Date()): string {
                       <td><input type="checkbox" [checked]="checked().has(it.id)" (click)="$event.stopPropagation()" (change)="toggle(it.id, $any($event.target).checked)" /></td>
                       <td [title]="it.issue?.title ?? it.name">
                         @if (it.issueKey) { <span class="ref-pill issue">{{ it.issueKey }}</span> }
+                        @if (it.issue) { <span class="status-pill" [class]="'status-pill ' + it.issue.statusType" style="margin:0 6px 0 0">{{ it.issue.status }}</span> }
                         {{ it.issue?.title ?? it.name }}
-                        @if (it.issue) { <span class="status-pill" [class]="'status-pill ' + it.issue.statusType">{{ it.issue.status }}</span> }
                         @if (it.needsCherryPick) { <span class="status-pill unknown" title="No branch left for this work; promotion will cherry-pick its commits">cherry-pick</span> }
                         @if (it.basedOnEnv) { <span class="status-pill canceled" title="This branch was cut from dev/stage, so it carries other unreleased work. Promoting it alone is not possible; recreate it from main (git rebase --onto main) before promoting.">branched from dev</span> }
                       </td>
@@ -105,13 +105,22 @@ function isoWeek(d = new Date()): string {
               <span style="flex:1"></span>
               <span class="muted">{{ checked().size }} selected</span>
               @if (tabEnv(); as te) {
-                @if (te.strategy === 'merge') { <button class="btn primary" [disabled]="!checked().size || busy()" (click)="promote(te)">Merge into {{ te.branch }}</button> }
-                @else { <button class="btn primary" [disabled]="!checked().size || busy()" (click)="createRelease(te)">Create release branch for {{ te.name || te.branch }}…</button> }
+                @switch (te.strategy) {
+                  @case ('feature-pr') { <button class="btn primary" [disabled]="!checked().size || busy()" (click)="openFeaturePRs(te)">Open pull requests into {{ te.branch }}</button> }
+                  @case ('release-branch') { <button class="btn primary" [disabled]="!checked().size || busy()" (click)="createRelease(te)">Create release branch + PR for {{ te.name || te.branch }}…</button> }
+                  @default { <button class="btn primary" [disabled]="!checked().size || busy()" (click)="promote(te)">Merge into {{ te.branch }}</button> }
+                }
               } @else {
-                @for (e of envs(); track e.id) { @if (e.strategy === 'merge') { <button class="btn" [disabled]="!checked().size || busy()" (click)="promote(e)">Merge into {{ e.branch }}</button> } }
+                @for (e of envs(); track e.id) {
+                  @switch (e.strategy) {
+                    @case ('feature-pr') { <button class="btn" [disabled]="!checked().size || busy()" (click)="openFeaturePRs(e)">PRs → {{ e.branch }}</button> }
+                    @case ('release-branch') { <button class="btn" [disabled]="!checked().size || busy()" (click)="createRelease(e)">Release → {{ e.branch }}…</button> }
+                    @default { <button class="btn" [disabled]="!checked().size || busy()" (click)="promote(e)">Merge → {{ e.branch }}</button> }
+                  }
+                }
               }
-              <button class="btn" [disabled]="busy() || !r.releaseBranches.length" (click)="finishRelease()" title="Merge a release branch into its environment, tag it, back-merge into the earlier environments">Finish release…</button>
-              <button class="btn" [disabled]="busy() || envs().length < 2" (click)="sync()" [title]="'Back-merge ' + chainText()">Sync environments</button>
+              @if (hasDirectMergeEnv()) { <button class="btn" [disabled]="busy() || !r.releaseBranches.length" (click)="finishRelease()" title="Direct-merge environments only: merge a release branch into its environment, tag it, back-merge into the earlier environments">Finish release…</button> }
+              <button class="btn" [disabled]="busy() || envs().length < 2" (click)="sync()" [title]="'Back-merge ' + chainText() + ' (pull requests, or direct merges for direct-merge environments)'">Sync environments</button>
               <button class="btn" [disabled]="busy()" (click)="startIssue()" [title]="'Create a branch for an issue from ' + baseEnv()?.branch"><pg-icon name="branch" [size]="14" />Start work on issue…</button>
             </div>
           </pg-panel>
@@ -184,6 +193,7 @@ export class Release {
   readonly lastEnv = computed<Environment | null>(() => this.envs()[this.envs().length - 1] ?? null)
   readonly baseEnv = computed<Environment | null>(() => { const c = this.cfg(); return c ? c.environments.find((e) => e.id === c.baseEnv) ?? this.lastEnv() : null })
   readonly tabEnv = computed<Environment | null>(() => this.envs().find((e) => e.id === this.tab()) ?? null)
+  readonly hasDirectMergeEnv = computed(() => this.envs().some((e) => e.strategy === 'merge'))
   shortName(e: Environment): string { return e.branch.length <= 8 ? e.branch : e.branch.slice(0, 7) + '…' }
   chainText(): string { return [...this.envs()].reverse().map((e) => e.branch).join(' → ') }
   /** ready for environment i: in environment i-1 (or anywhere, for the first) and not in i or any later one */
@@ -244,7 +254,7 @@ export class Release {
       this.store.toast('error', `Conflict while applying ${res.conflict}. Resolve it in the Files panel, then continue the merge and run the remaining items again.\n${res.message.split('\n').slice(0, 3).join('\n')}`)
       this.store.perspective.set('standard')
     } else {
-      this.store.toast('success', res.message)
+      this.store.toast('success', res.message + (res.prUrls?.length ? `\nOpened ${res.prUrls.length} pull request page(s) in your browser.` : ''))
       if (state && this.updateTracker() && this.trackerOk()) {
         for (const it of items) if (it.issueKey && res.merged.includes(it.id)) await this.store.api.trackerSetState(it.issueKey, state).catch((e) => this.store.toast('error', `Linear ${it.issueKey}: ${e instanceof Error ? e.message : String(e)}`))
       }
@@ -264,18 +274,27 @@ export class Release {
   }
   async createRelease(env: Environment): Promise<void> {
     const r = this.store.repo(); const items = this.selectedItems(); const c = this.cfg(); if (!r || !items.length || !c) return
-    const v = await this.store.prompt({ title: `Create release branch for ${env.name || env.branch}`, okLabel: 'Create', message: `From ${c.remote}/${this.baseEnv()?.branch} with ${items.length} item(s):\n${items.map((i) => '• ' + (i.issueKey ?? i.name)).join('\n')}`, fields: [{ key: 'name', label: 'Release name', value: `release-${isoWeek()}` }] })
+    const v = await this.store.prompt({ title: `Create release branch for ${env.name || env.branch}`, okLabel: 'Create', message: `Cuts a branch from ${c.remote}/${env.branch}, merges ${items.length} item(s) into it${this.push() ? ', pushes it and opens the pull request into ' + env.branch : ''}:\n${items.map((i) => '• ' + (i.issueKey ?? i.name)).join('\n')}`, fields: [{ key: 'name', label: 'Release branch name', value: `${env.branch}-${isoWeek()}` }] })
     if (!v || !v.name) return
     this.busy.set(true)
     try {
       const res = await this.store.api.startRelease(r.path, env.id, String(v.name), items.map((i) => this.toInput(i)), this.push())
       await this.afterOp(res, items, undefined)
-      if (!res.conflict) this.store.toast('info', `Review or open a pull request for ${c.releasePrefix}${String(v.name).replace(c.releasePrefix, '')}, then use "Finish release" to land it in ${env.branch}.`)
+      if (!res.conflict && !this.push()) this.store.toast('info', `Push ${res.branch} and open a pull request into ${env.branch} when ready.`)
     } catch (e) { this.store.toast('error', e instanceof Error ? e.message : String(e)) } finally { this.busy.set(false) }
+  }
+  async openFeaturePRs(env: Environment): Promise<void> {
+    const r = this.store.repo(); const items = this.selectedItems(); if (!r || !items.length) return
+    const withBranch = items.filter((i) => i.branches.length)
+    const ok = await this.store.prompt({ title: `Pull requests into ${env.branch}`, okLabel: 'Open', message: `Opens one pull request page per feature branch (${withBranch.length}):\n${withBranch.map((i) => '• ' + (i.issueKey ?? i.name) + ' ← ' + i.branches[0].name).join('\n')}${items.length !== withBranch.length ? `\n\n${items.length - withBranch.length} item(s) have no branch and will be skipped.` : ''}` })
+    if (!ok) return
+    this.busy.set(true)
+    try { await this.afterOp(await this.store.api.openFeaturePRs(r.path, env.id, withBranch.map((i) => this.toInput(i))), withBranch, env.trackerState || undefined) }
+    catch (e) { this.store.toast('error', e instanceof Error ? e.message : String(e)) } finally { this.busy.set(false) }
   }
   async finishRelease(): Promise<void> {
     const r = this.store.repo(); const rel = this.store.release(); if (!r || !rel) return
-    const targets = this.envs().filter((e) => e.strategy === 'release-branch')
+    const targets = this.envs().filter((e) => e.strategy === 'merge')
     const envOptions = (targets.length ? targets : this.envs()).map((e) => `${e.name || e.branch} (${e.branch})`)
     const v = await this.store.prompt({ title: 'Finish release', okLabel: 'Finish', message: `Merges the release branch into the chosen environment, tags it${rel.config.backMerge ? ', then back-merges into the earlier environments' : ''}${this.push() ? ' and pushes' : ''}.`, fields: [
       { key: 'branch', label: 'Release branch', type: 'select', options: rel.releaseBranches.map((b) => b.ref) },

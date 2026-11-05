@@ -2,7 +2,42 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import * as git from './git'
 import { tracker } from './tracker'
-import type { Commit, EnvConfig, Environment, PromoteResult, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
+import type { Commit, EnvConfig, Environment, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
+
+// ---------- pull requests on the hosting provider ----------
+
+/** How PR pages are opened; replaced in tests. Default: the system browser (set by the main process). */
+let prOpener: (url: string) => Promise<void> = async () => undefined
+export function setPrOpener(fn: (url: string) => Promise<void>): void { prOpener = fn }
+
+export function parseRemote(url: string): { provider: PullRequestInfo['provider']; host: string; path: string } {
+  let m = /^(?:https?:\/\/|git@|ssh:\/\/git@)([^/:]+)[/:](.+?)(?:\.git)?\/?$/.exec(url.trim())
+  if (!m) return { provider: 'unknown', host: '', path: '' }
+  const host = m[1], path = m[2]
+  const provider = /github\.com$/.test(host) ? 'github' : /gitlab/.test(host) ? 'gitlab' : /bitbucket/.test(host) ? 'bitbucket' : 'unknown'
+  return { provider, host, path }
+}
+
+export function pullRequestUrl(remoteUrl: string, head: string, base: string, title: string, body: string): PullRequestInfo {
+  const { provider, host, path } = parseRemote(remoteUrl)
+  const q = (o: Record<string, string>) => Object.entries(o).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+  let url = ''
+  if (provider === 'github') url = `https://${host}/${path}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?${q({ expand: '1', title, body })}`
+  else if (provider === 'gitlab') url = `https://${host}/${path}/-/merge_requests/new?${q({ 'merge_request[source_branch]': head, 'merge_request[target_branch]': base, 'merge_request[title]': title, 'merge_request[description]': body })}`
+  else if (provider === 'bitbucket') url = `https://${host}/${path}/pull-requests/new?${q({ source: head, dest: base, title })}`
+  return { url, head, base, title, provider }
+}
+
+export async function openPullRequest(repo: string, head: string, base: string, title: string, body: string): Promise<PullRequestInfo> {
+  const cfg = await releaseConfig(repo)
+  const remotes = await git.refs(repo)
+  const remote = remotes.remotes.find((r) => r.name === cfg.remote)
+  if (!remote) throw new Error(`Remote "${cfg.remote}" not found`)
+  const pr = pullRequestUrl(remote.pushUrl || remote.fetchUrl, head, base, title, body)
+  if (!pr.url) throw new Error(`Cannot build a pull-request link for ${remote.fetchUrl}; open it on your hosting provider: ${head} → ${base}`)
+  await prOpener(pr.url)
+  return pr
+}
 
 // ---------- per-repository environment configuration ----------
 
@@ -20,10 +55,10 @@ export async function detectConfig(repo: string): Promise<EnvConfig> {
   const names = new Set(refs.branches.map((b) => b.name))
   const remote = refs.remotes.find((r) => r.name === 'origin')?.name ?? refs.remotes[0]?.name ?? 'origin'
   const envs: Environment[] = []
-  const dev = DEV.find((c) => names.has(c)); if (dev) envs.push({ id: 'dev', name: 'Development', branch: dev, strategy: 'merge', trackerState: 'QA' })
-  const stage = STAGE.find((c) => names.has(c)); if (stage) envs.push({ id: 'stage', name: 'Staging', branch: stage, strategy: 'merge', trackerState: 'UAT' })
+  const dev = DEV.find((c) => names.has(c)); if (dev) envs.push({ id: 'dev', name: 'Development', branch: dev, strategy: 'feature-pr', trackerState: 'QA' })
+  const stage = STAGE.find((c) => names.has(c)); if (stage) envs.push({ id: 'stage', name: 'Staging', branch: stage, strategy: 'release-branch', trackerState: 'UAT' })
   const prod = PROD.find((c) => names.has(c)) ?? 'main'
-  envs.push({ id: 'prod', name: 'Production', branch: prod, strategy: envs.length ? 'release-branch' : 'merge', trackerState: 'Done' })
+  envs.push({ id: 'prod', name: 'Production', branch: prod, strategy: 'release-branch', trackerState: 'Done' })
   return { remote, environments: envs, baseEnv: 'prod', releasePrefix: 'release/', backMerge: true }
 }
 
@@ -32,8 +67,8 @@ function migrate(raw: Record<string, unknown>): EnvConfig | null {
   if (Array.isArray(raw['environments'])) return raw as unknown as EnvConfig
   if (typeof raw['prod'] === 'string') {
     const envs: Environment[] = []
-    if (raw['dev']) envs.push({ id: 'dev', name: 'Development', branch: String(raw['dev']), strategy: 'merge', trackerState: 'QA' })
-    if (raw['stage']) envs.push({ id: 'stage', name: 'Staging', branch: String(raw['stage']), strategy: 'merge', trackerState: 'UAT' })
+    if (raw['dev']) envs.push({ id: 'dev', name: 'Development', branch: String(raw['dev']), strategy: 'feature-pr', trackerState: 'QA' })
+    if (raw['stage']) envs.push({ id: 'stage', name: 'Staging', branch: String(raw['stage']), strategy: 'release-branch', trackerState: 'UAT' })
     envs.push({ id: 'prod', name: 'Production', branch: String(raw['prod']), strategy: 'release-branch', trackerState: 'Done' })
     return { remote: String(raw['remote'] ?? 'origin'), environments: envs, baseEnv: 'prod', releasePrefix: String(raw['releasePrefix'] ?? 'release/'), backMerge: true }
   }
@@ -256,18 +291,42 @@ export async function promote(repo: string, envId: string, items: PromoteInput[]
   return res
 }
 
+/** Cut a release branch from the target environment, merge the picked items into it, push and open a pull request. */
 export async function startRelease(repo: string, envId: string, name: string, items: PromoteInput[], push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
-  envById(cfg, envId) // validates
+  const env = envById(cfg, envId)
   const branch = name.startsWith(cfg.releasePrefix) ? name : cfg.releasePrefix + name
   const st = await git.status(repo)
   if (st.files.some((f) => f.area !== 'untracked')) throw new Error('Working tree has uncommitted changes. Commit or stash them first.')
-  const baseName = baseBranch(cfg)
-  const base = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${baseName}`], true)).code === 0 ? `${cfg.remote}/${baseName}` : baseName
+  const base = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${env.branch}`], true)).code === 0 ? `${cfg.remote}/${env.branch}` : env.branch
   await run(repo, ['checkout', '-b', branch, base])
   const res = await applyItems(repo, items, branch)
-  if (!res.conflict && push) await run(repo, ['push', '-u', cfg.remote, branch])
-  res.message ||= `Created ${branch} from ${base} with ${res.merged.length} item(s)${push ? ' and pushed' : ''}`
+  res.branch = branch
+  if (res.conflict) return res
+  if (push) {
+    await run(repo, ['push', '-u', cfg.remote, branch])
+    const title = `Release ${branch.replace(cfg.releasePrefix, '')} → ${env.branch}`
+    const body = `Items:\n${res.merged.map((m) => `- ${m}`).join('\n')}\n\nCreated by PakGit from ${base}.`
+    try { const pr = await openPullRequest(repo, branch, env.branch, title, body); res.prUrls = [pr.url] } catch (e) { res.message = e instanceof Error ? e.message : String(e) }
+  }
+  res.message ||= `Created ${branch} from ${base} with ${res.merged.length} item(s)${push ? ', pushed and opened the pull request' : ''}`
+  return res
+}
+
+/** One pull request per feature branch into the environment (branches must already be on the remote). */
+export async function openFeaturePRs(repo: string, envId: string, items: PromoteInput[]): Promise<PromoteResult> {
+  const cfg = await releaseConfig(repo)
+  const env = envById(cfg, envId)
+  const res: PromoteResult = { merged: [], conflict: null, skipped: [], message: '', prUrls: [] }
+  for (const it of items) {
+    if (!it.ref) { res.skipped.push(it.id); continue }
+    const head = it.ref.startsWith(cfg.remote + '/') ? it.ref.slice(cfg.remote.length + 1) : it.ref
+    const onRemote = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${head}`], true)).code === 0
+    if (!onRemote) await run(repo, ['push', '-u', cfg.remote, head])
+    const pr = await openPullRequest(repo, head, env.branch, `${it.id}: ${head.split('/').pop()} → ${env.branch}`, `Pull request for ${it.id} into ${env.branch}, created by PakGit.`)
+    res.prUrls!.push(pr.url); res.merged.push(it.id)
+  }
+  res.message = res.merged.length ? `Opened ${res.merged.length} pull request(s) into ${env.branch}${res.skipped.length ? `; skipped ${res.skipped.length} item(s) without a branch` : ''}` : 'Nothing to open'
   return res
 }
 
@@ -287,21 +346,46 @@ export async function finishRelease(repo: string, envId: string, releaseBranch: 
   return res
 }
 
-/** Merge `from` into each environment before it, most stable first (prod -> stage -> dev). */
+/**
+ * Propagate `from` into each environment before it, most stable first (prod -> stage -> dev).
+ * Environments with the direct-merge strategy are merged and pushed; the others get a sync branch and a pull request.
+ */
 async function backMerge(repo: string, cfg: EnvConfig, from: Environment, push: boolean): Promise<PromoteResult> {
-  const res: PromoteResult = { merged: [], conflict: null, skipped: [], message: '' }
+  const res: PromoteResult = { merged: [], conflict: null, skipped: [], message: '', prUrls: [] }
   const idx = cfg.environments.indexOf(from)
   let source = from.branch
+  const day = new Date().toISOString().slice(0, 10)
   for (let i = idx - 1; i >= 0; i--) {
-    const to = cfg.environments[i].branch
+    const target = cfg.environments[i]
+    const to = target.branch
     const exists = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${to}`], true)).code === 0 || (await run(repo, ['rev-parse', '--verify', '-q', `refs/heads/${to}`], true)).code === 0
     if (!exists) { res.skipped.push(to); continue }
-    await checkoutEnv(repo, cfg, to)
-    const r = await git.run(['merge', '--no-ff', '--no-edit', '-m', `Merge ${source} into ${to}`, source], { cwd: repo, allowFail: true, env: { GIT_EDITOR: 'true' } })
-    if (r.code !== 0) { res.conflict = `${source} → ${to}`; res.message = r.stderr || r.stdout; return res }
-    res.merged.push(`${source} → ${to}`)
-    if (push) await run(repo, ['push', cfg.remote, to])
-    source = to
+    const srcRef = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${source}`], true)).code === 0 ? `${cfg.remote}/${source}` : source
+    const toRef = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${to}`], true)).code === 0 ? `${cfg.remote}/${to}` : to
+    if ((await run(repo, ['merge-base', '--is-ancestor', srcRef, toRef], true)).code === 0) { res.skipped.push(`${source} → ${to} (up to date)`); source = to; continue }
+    if (target.strategy === 'merge') {
+      await checkoutEnv(repo, cfg, to)
+      const r = await git.run(['merge', '--no-ff', '--no-edit', '-m', `Merge ${source} into ${to}`, srcRef], { cwd: repo, allowFail: true, env: { GIT_EDITOR: 'true' } })
+      if (r.code !== 0) { res.conflict = `${source} → ${to}`; res.message = r.stderr || r.stdout; return res }
+      if (push) await run(repo, ['push', cfg.remote, to])
+      res.merged.push(`${source} → ${to}`)
+    } else {
+      const sync = `sync/${source}-into-${to}-${day}`
+      const st = await git.status(repo)
+      if (st.files.some((f) => f.area !== 'untracked')) throw new Error('Working tree has uncommitted changes. Commit or stash them first.')
+      await run(repo, ['branch', '-D', sync], true)
+      await run(repo, ['checkout', '-b', sync, toRef])
+      const r = await git.run(['merge', '--no-ff', '--no-edit', '-m', `Merge ${source} into ${to}`, srcRef], { cwd: repo, allowFail: true, env: { GIT_EDITOR: 'true' } })
+      if (r.code !== 0) { res.conflict = `${source} → ${to}`; res.branch = sync; res.message = `${r.stderr || r.stdout}\nResolve on ${sync}, then push it and open a pull request into ${to}.`; return res }
+      if (push) {
+        await run(repo, ['push', '-u', '-f', cfg.remote, sync])
+        try { const pr = await openPullRequest(repo, sync, to, `Sync ${source} into ${to}`, `Back-merge of ${source} into ${to} after a release, created by PakGit.`); res.prUrls!.push(pr.url) } catch (e) { res.message += (e instanceof Error ? e.message : String(e)) + '\n' }
+      }
+      res.merged.push(`${source} → ${to} (PR from ${sync})`)
+    }
+    // the next step must carry what we just merged: with direct merges `to` already has it,
+    // with a PR the target is still behind, so keep merging from the same source
+    if (target.strategy === 'merge') source = to
   }
   return res
 }
@@ -309,7 +393,7 @@ async function backMerge(repo: string, cfg: EnvConfig, from: Environment, push: 
 export async function syncEnvironments(repo: string, push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
   const res = await backMerge(repo, cfg, lastEnv(cfg), push)
-  res.message ||= res.merged.length ? `Synced: ${res.merged.join(', ')}${push ? ' (pushed)' : ''}` : 'Nothing to sync'
+  res.message ||= res.merged.length ? `Synced: ${res.merged.join(', ')}${push ? ' (pushed)' : ''}` : `Nothing to sync${res.skipped.length ? ` (${res.skipped.join(', ')})` : ''}`
   return res
 }
 

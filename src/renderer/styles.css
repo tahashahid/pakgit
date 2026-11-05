@@ -209,7 +209,7 @@ pg-release { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .status-pill.canceled { color: var(--danger); } .status-pill.unknown { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 50%, transparent); }
 .release pg-panel .panel-body { display: flex; flex-direction: column; }
 .env-list { display: flex; flex-direction: column; gap: 4px; }
-.env-row { display: grid; grid-template-columns: 62px 1.2fr 1.2fr 130px 1.2fr 30px; gap: 6px; align-items: center; }
+.env-row { display: grid; grid-template-columns: 62px 1.1fr 1.1fr 170px 1.1fr 30px; gap: 6px; align-items: center; }
 .env-row.head { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .04em; }
 .env-row input, .env-row select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg1); color: var(--fg1); min-width: 0; }
 .env-row .env-move { display: inline-flex; gap: 2px; }

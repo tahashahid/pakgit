@@ -63,6 +63,8 @@ const api: PakGitApi = {
   startRelease: call('release:start'),
   finishRelease: call('release:finish'),
   syncEnvironments: call('release:sync'),
+  openFeaturePRs: call('release:openFeaturePRs'),
+  openPullRequest: call('release:openPR'),
   startIssue: call('release:startIssue'),
   enableRerere: call('release:enableRerere'),
   trackerStatus: call('tracker:status'),

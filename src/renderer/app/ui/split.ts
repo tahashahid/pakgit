@@ -12,6 +12,8 @@ export class Split {
   readonly dir = input.required<'h' | 'v'>()
   readonly initial = input.required<number>()
   readonly min = input(120)
+  /** minimum size of the second pane (defaults to min) */
+  readonly minSecond = input<number | null>(null)
   readonly storageKey = input<string>()
   readonly size = signal(0)
   private readonly el = inject<ElementRef<HTMLElement>>(ElementRef)
@@ -23,12 +25,12 @@ export class Split {
   }
   onDown(e: MouseEvent): void {
     e.preventDefault()
-    const dir = this.dir(), min = this.min()
+    const dir = this.dir(), min = this.min(), minB = this.minSecond() ?? min
     const start = dir === 'h' ? e.clientX : e.clientY
     const startSize = this.size()
     const move = (ev: MouseEvent) => {
       const total = dir === 'h' ? this.el.nativeElement.clientWidth : this.el.nativeElement.clientHeight
-      this.size.set(Math.min(total - min, Math.max(min, startSize + ((dir === 'h' ? ev.clientX : ev.clientY) - start))))
+      this.size.set(Math.min(total - minB, Math.max(min, startSize + ((dir === 'h' ? ev.clientX : ev.clientY) - start))))
     }
     const up = () => {
       window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up)

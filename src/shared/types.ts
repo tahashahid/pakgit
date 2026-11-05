@@ -264,8 +264,13 @@ export interface Environment {
   id: string
   name: string
   branch: string
-  /** how work reaches this environment: merge feature branches directly, or collect them in a release branch first */
-  strategy: 'merge' | 'release-branch'
+  /**
+   * how work reaches this environment:
+   * - feature-pr: one pull request per feature branch (feature → environment)
+   * - release-branch: picked items are merged into a release branch cut from the environment, then one pull request
+   * - merge: direct merge into the environment branch, no pull request
+   */
+  strategy: 'feature-pr' | 'release-branch' | 'merge'
   /** tracker state to set when work lands here; empty = do not update */
   trackerState: string
 }
@@ -330,7 +335,13 @@ export interface PromoteResult {
   conflict: string | null
   skipped: string[]
   message: string
+  /** branch that was created (release or sync branch) */
+  branch?: string
+  /** pull-request pages opened or to open */
+  prUrls?: string[]
 }
+
+export interface PullRequestInfo { url: string; head: string; base: string; title: string; provider: 'github' | 'gitlab' | 'bitbucket' | 'unknown' }
 
 export interface ReleaseApi {
   releaseConfig(repo: string): Promise<EnvConfig>
@@ -339,8 +350,12 @@ export interface ReleaseApi {
   releaseAnalyze(repo: string): Promise<ReleaseAnalysis>
   /** merge feature branches (or cherry-pick their commits) into an environment's branch */
   promote(repo: string, envId: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
-  /** create a release branch from the base environment containing the given items (for environments using the release-branch strategy) */
+  /** create a release branch cut from the environment's branch containing the given items, push it and open a pull request */
   startRelease(repo: string, envId: string, name: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
+  /** open one pull request per feature branch into the environment */
+  openFeaturePRs(repo: string, envId: string, items: { id: string; ref: string | null; commits: string[] }[]): Promise<PromoteResult>
+  /** compute the hosting provider's pull-request page for head → base (and open it in the browser) */
+  openPullRequest(repo: string, head: string, base: string, title: string, body: string): Promise<PullRequestInfo>
   /** merge a release branch into an environment, tag, then back-merge into the earlier environments */
   finishRelease(repo: string, envId: string, releaseBranch: string, tag: string | null, push: boolean): Promise<PromoteResult>
   /** back-merge the last environment into every earlier one */
