@@ -43,6 +43,7 @@ import type { BranchInfo, RemoteInfo, StashInfo, SubmoduleInfo, TagInfo, Worktre
         <button class="btn small" title="Add branch" (click)="a.addBranch()"><pg-icon name="plus" [size]="14" /></button>
         <button class="btn small" title="Fetch all" (click)="a.fetch()"><pg-icon name="fetch" [size]="14" /></button>
       </ng-container>
+      <div class="sticky-top">
       @if (store.status(); as st) {
         <div class="current-branch" (click)="revealCurrent()" title="Current branch (click to reveal in the tree)" (contextmenu)="currentMenu($event)">
           <pg-icon name="branch" [size]="14" />
@@ -53,6 +54,7 @@ import type { BranchInfo, RemoteInfo, StashInfo, SubmoduleInfo, TagInfo, Worktre
         </div>
       }
       <input class="filter-input" placeholder="Filter branches, tags…" [value]="filter()" (input)="filter.set($any($event.target).value)" />
+      </div>
 
       <div class="group-header" (click)="toggle('local')"><span>{{ open('local') ? '▾' : '▸' }}</span>Local Branches<span class="count">{{ local().length }}</span></div>
       @if (open('local')) {
