@@ -1,7 +1,8 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
-import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
 
+// The renderer is an Angular application built by the Angular CLI (see angular.json);
+// electron-vite only builds the main and preload bundles here.
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
@@ -10,9 +11,5 @@ export default defineConfig({
   preload: {
     plugins: [externalizeDepsPlugin()],
     resolve: { alias: { '@shared': resolve('src/shared') } }
-  },
-  renderer: {
-    resolve: { alias: { '@shared': resolve('src/shared'), '@': resolve('src/renderer/src') } },
-    plugins: [react()]
   }
 })

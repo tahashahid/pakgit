@@ -1,22 +1,47 @@
-import { useMemo } from 'react'
-import { useStore } from './store'
+import { Injectable, inject } from '@angular/core'
+import { Store } from './store.service'
 import type { BranchInfo, Commit, FileEntry, StashInfo, TagInfo } from '@shared/types'
 
-/** All user-facing git operations, with dialogs, in one place (mirrors SmartGit's command catalogue). */
-export function useActions() {
-  const s = useStore()
-  const { api, prompt, run, toast } = s
-  const repo = s.repo?.path
-  return useMemo(() => {
-    const need = (): string => { if (!repo) throw new Error('No repository selected'); return repo }
-    const local = () => (s.refs?.branches ?? []).filter((b) => !b.remote).map((b) => b.name)
-    const allRefs = () => [
-      ...(s.refs?.branches ?? []).map((b) => b.fullName),
-      ...(s.refs?.tags ?? []).map((t) => t.name)
-    ]
+/** All user-facing git operations with their dialogs (mirrors SmartGit's command catalogue). */
+@Injectable({ providedIn: 'root' })
+export class Actions {
+  private readonly s = inject(Store)
+  private get repoPath(): string | undefined { return this.s.repo()?.path }
+
+  /** Built lazily so the closures see the live store. */
+  readonly a = this.build()
+
+  private build() {
+    const s = this.s
+    const api = s.api
+    const prompt = s.prompt.bind(s)
+    const run = s.run.bind(s)
+    const toast = s.toast.bind(s)
+    const repo = () => this.repoPath
+    const need = (): string => { const r = repo(); if (!r) throw new Error('No repository selected'); return r }
+    const local = () => (s.refs()?.branches ?? []).filter((b) => !b.remote).map((b) => b.name)
+    const allRefs = () => [...(s.refs()?.branches ?? []).map((b) => b.fullName), ...(s.refs()?.tags ?? []).map((t) => t.name)]
     return {
-      // --- repositories ---
-      openRepo: () => s.addRepo(),
+      // --- repositories & groups ---
+      openRepo: (group?: string | null) => s.addRepo(undefined, group),
+      createGroup: async (): Promise<string | null> => {
+        const v = await prompt({ title: 'New Group', okLabel: 'Create', fields: [{ key: 'name', label: 'Group name', placeholder: 'e.g. Work' }] })
+        if (!v || !String(v.name).trim()) return null
+        const name = String(v.name).trim()
+        try { await api.createGroup(name); await s.reloadRepos(); return name } catch (e) { toast('error', String(e)); return null }
+      },
+      renameGroup: async (name: string) => {
+        const v = await prompt({ title: 'Rename Group', okLabel: 'Rename', fields: [{ key: 'name', label: 'New name', value: name }] })
+        if (!v || !String(v.name).trim() || v.name === name) return
+        try { await api.renameGroup(name, String(v.name).trim()); await s.reloadRepos() } catch (e) { toast('error', String(e)) }
+      },
+      deleteGroup: async (name: string) => {
+        if (!(await prompt({ title: 'Delete Group', danger: true, okLabel: 'Delete', message: `Delete group "${name}"? Its repositories stay in the list, ungrouped.` }))) return
+        try { await api.deleteGroup(name); await s.reloadRepos() } catch (e) { toast('error', String(e)) }
+      },
+      moveRepoToGroup: async (path: string, group: string | null) => {
+        try { await api.setRepoGroup(path, group); await s.reloadRepos() } catch (e) { toast('error', String(e)) }
+      },
       clone: async () => {
         const v = await prompt({ title: 'Clone Repository', okLabel: 'Clone', fields: [
           { key: 'url', label: 'Repository URL', placeholder: 'https://github.com/user/repo.git' },
@@ -39,23 +64,23 @@ export function useActions() {
         const entry = await run('Initialize', () => api.initRepo(dir))
         if (entry) await s.addRepo(entry.path)
       },
-      terminal: () => repo && api.openTerminal(repo),
+      terminal: () => this.repoPath && api.openTerminal(this.repoPath),
       // --- remote ---
       fetch: (remote?: string) => run('Fetch', () => api.fetch(need(), remote, true), { success: 'Fetched' }),
       pull: async () => {
-        const v = await prompt({ title: 'Pull', okLabel: 'Pull', message: `Pull ${s.status?.upstream ?? 'upstream'} into ${s.status?.branch ?? 'HEAD'}`, fields: [
-          { key: 'mode', label: 'Strategy', type: 'select', options: [s.settings?.pullMode ?? 'merge', ...(['merge', 'rebase', 'ff-only'] as const).filter((m) => m !== (s.settings?.pullMode ?? 'merge'))] }
+        const v = await prompt({ title: 'Pull', okLabel: 'Pull', message: `Pull ${s.status()?.upstream ?? 'upstream'} into ${s.status()?.branch ?? 'HEAD'}`, fields: [
+          { key: 'mode', label: 'Strategy', type: 'select', options: [s.settings()?.pullMode ?? 'merge', ...(['merge', 'rebase', 'ff-only'] as const).filter((m) => m !== (s.settings()?.pullMode ?? 'merge'))] }
         ] })
         if (!v) return
         await run('Pull', () => api.pull(need(), v.mode as 'merge'), { success: 'Pull finished' })
       },
       push: async () => {
-        const remotes = (s.refs?.remotes ?? []).map((r) => r.name)
+        const remotes = (s.refs()?.remotes ?? []).map((r) => r.name)
         if (!remotes.length) { toast('error', 'No remote configured. Add one via Branches ▸ Remotes.'); return }
         const v = await prompt({ title: 'Push', okLabel: 'Push', fields: [
           { key: 'remote', label: 'Remote', type: 'select', options: remotes },
-          { key: 'branch', label: 'Branch', value: s.status?.branch ?? '' },
-          { key: 'setUpstream', label: 'Set as upstream (--set-upstream)', type: 'checkbox', value: String(!s.status?.upstream) },
+          { key: 'branch', label: 'Branch', value: s.status()?.branch ?? '' },
+          { key: 'setUpstream', label: 'Set as upstream (--set-upstream)', type: 'checkbox', value: String(!s.status()?.upstream) },
           { key: 'force', label: 'Force push (--force-with-lease)', type: 'checkbox' },
           { key: 'tags', label: 'Push tags', type: 'checkbox' }
         ] })
@@ -77,7 +102,7 @@ export function useActions() {
       stageAll: () => run('Stage all', () => api.stage(need(), ['.'])),
       unstageAll: () => run('Unstage all', () => api.unstage(need(), ['.'])),
       discard: async (files: FileEntry[]) => {
-        if (s.settings?.confirmDiscard !== false) {
+        if (s.settings()?.confirmDiscard !== false) {
           const v = await prompt({ title: 'Discard Changes', danger: true, okLabel: 'Discard', message: `Discard local changes of ${files.length === 1 ? files[0].path : files.length + ' files'}?\nUntracked files will be deleted. This cannot be undone.` })
           if (!v) return
         }
@@ -95,7 +120,7 @@ export function useActions() {
       },
       resolve: (file: FileEntry, side: 'ours' | 'theirs') => run(`Take ${side}`, () => api.resolveConflict(need(), file.path, side)),
       markResolved: (files: FileEntry[]) => run('Mark resolved', () => api.markResolved(need(), files.map((f) => f.path))),
-      fileLog: (file: { path: string }) => { s.setLogPath(file.path); if (s.perspective === 'worktree') s.setPerspective('standard') },
+      fileLog: (file: { path: string }) => { s.setLogPath(file.path); if (s.perspective() === 'worktree') s.perspective.set('standard') },
       blame: (file: { path: string }, rev?: string) => s.showBlame(file.path, rev),
       createPatch: async (c: Commit) => {
         const safe = c.subject.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50)
@@ -121,10 +146,10 @@ export function useActions() {
         const chain = list.slice(0, idx + 1).reverse()
         if (chain.some((c) => c.parents.length > 1)) { toast('error', 'Interactive rebase over merge commits is not supported here'); return }
         const base = from.parents[0] ?? '--root'
-        s.setRebase({ base, todo: chain.map((c) => ({ action: 'pick', sha: c.sha, subject: c.subject })) })
+        s.rebase.set({ base, todo: chain.map((c) => ({ action: 'pick', sha: c.sha, subject: c.subject })) })
       },
       pushBranch: async (b: BranchInfo) => {
-        const remotes = (s.refs?.remotes ?? []).map((r) => r.name)
+        const remotes = (s.refs()?.remotes ?? []).map((r) => r.name)
         if (!remotes.length) { toast('error', 'No remote configured.'); return }
         const v = await prompt({ title: `Push ${b.name}`, okLabel: 'Push', fields: [
           { key: 'remote', label: 'Remote', type: 'select', options: remotes },
@@ -135,7 +160,7 @@ export function useActions() {
         await run('Push', () => api.push(need(), { remote: String(v.remote), branch: b.name, setUpstream: !!v.setUpstream, force: !!v.force }), { success: `Pushed ${b.name}` })
       },
       setUpstream: async (b: BranchInfo) => {
-        const options = (s.refs?.branches ?? []).filter((x) => x.remote).map((x) => x.fullName)
+        const options = (s.refs()?.branches ?? []).filter((x) => x.remote).map((x) => x.fullName)
         if (!options.length) { toast('error', 'No remote branches. Fetch first.'); return }
         const guess = options.find((o) => o.endsWith('/' + b.name))
         const v = await prompt({ title: `Track Remote Branch for ${b.name}`, okLabel: 'Set', fields: [{ key: 'u', label: 'Upstream', type: 'select', options: guess ? [guess, ...options.filter((o) => o !== guess)] : options }] })
@@ -164,8 +189,8 @@ export function useActions() {
         if (!v || !v.pattern) return
         await run('Ignore', () => api.ignore(need(), String(v.pattern)))
       },
-      openFile: (file: FileEntry) => repo && api.openInEditor(repo, file.path),
-      reveal: (file?: FileEntry) => repo && api.revealInFinder(repo, file?.path),
+      openFile: (file: FileEntry) => this.repoPath && api.openInEditor(this.repoPath, file.path),
+      reveal: (file?: FileEntry) => this.repoPath && api.revealInFinder(this.repoPath, file?.path),
       focusCommit: () => document.querySelector<HTMLInputElement>('.commit-form .subject')?.focus(),
       undoLastCommit: async () => {
         if (!(await prompt({ title: 'Undo Last Commit', okLabel: 'Undo', message: 'Move HEAD to the previous commit and keep the changes staged?' }))) return
@@ -189,7 +214,7 @@ export function useActions() {
       addBranch: async (startPoint?: string) => {
         const v = await prompt({ title: 'Add Branch', okLabel: 'Add', fields: [
           { key: 'name', label: 'Name' },
-          { key: 'start', label: 'Start point', value: startPoint ?? s.status?.branch ?? 'HEAD' },
+          { key: 'start', label: 'Start point', value: startPoint ?? s.status()?.branch ?? 'HEAD' },
           { key: 'checkout', label: 'Check out new branch', type: 'checkbox', value: 'true' }
         ] })
         if (!v || !v.name) return
@@ -239,7 +264,7 @@ export function useActions() {
       cherryPick: (c: Commit) => run('Cherry pick', () => api.cherryPick(need(), c.sha)),
       revert: (c: Commit) => run('Revert', () => api.revert(need(), c.sha)),
       reset: async (c: Commit) => {
-        const v = await prompt({ title: 'Reset', danger: true, okLabel: 'Reset', message: `Reset ${s.status?.branch ?? 'HEAD'} to ${c.shortSha} "${c.subject}"`, fields: [
+        const v = await prompt({ title: 'Reset', danger: true, okLabel: 'Reset', message: `Reset ${s.status()?.branch ?? 'HEAD'} to ${c.shortSha} "${c.subject}"`, fields: [
           { key: 'mode', label: 'Mode', type: 'select', options: ['mixed', 'soft', 'hard'] }
         ] })
         if (!v) return
@@ -259,5 +284,5 @@ export function useActions() {
       },
       copy: (text: string) => { void navigator.clipboard.writeText(text); toast('info', 'Copied to clipboard') }
     }
-  }, [s, api, prompt, run, toast, repo])
+  }
 }

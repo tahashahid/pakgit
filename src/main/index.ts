@@ -1,10 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeTheme } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeTheme, safeStorage } from 'electron'
 import { join, basename, dirname } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { spawn } from 'child_process'
 import chokidar, { FSWatcher } from 'chokidar'
 import * as git from './git'
-import type { CommitOptions, DiffRequest, FileArea, RepoEntry } from '@shared/types'
+import * as release from './release'
+import { configureTracker, tracker } from './tracker'
+import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
+import type { BranchTarget, CommitOptions, DiffRequest, FileArea, PrepareOptions, RepoEntry } from '@shared/types'
 
 // ---------- repository registry ----------
 
@@ -16,10 +19,19 @@ function saveRepos(list: RepoEntry[]): void {
   mkdirSync(dirname(storeFile()), { recursive: true })
   writeFileSync(storeFile(), JSON.stringify(list, null, 2))
 }
+const groupsFile = () => join(app.getPath('userData'), 'groups.json')
+function loadGroups(): string[] {
+  try { return JSON.parse(readFileSync(groupsFile(), 'utf8')) } catch { return [] }
+}
+function saveGroups(list: string[]): void {
+  mkdirSync(dirname(groupsFile()), { recursive: true })
+  writeFileSync(groupsFile(), JSON.stringify(list, null, 2))
+}
 async function registerRepo(path: string): Promise<RepoEntry> {
   const top = await git.topLevel(path)
+  const existing = loadRepos().find((r) => r.path === top)
   const list = loadRepos().filter((r) => r.path !== top)
-  const entry: RepoEntry = { path: top, name: basename(top), lastOpened: Date.now() }
+  const entry: RepoEntry = { path: top, name: basename(top), lastOpened: Date.now(), group: existing?.group ?? null }
   list.unshift(entry)
   saveRepos(list)
   return entry
@@ -29,16 +41,47 @@ async function registerRepo(path: string): Promise<RepoEntry> {
 
 import type { Settings } from '@shared/types'
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
-const defaultSettings: Settings = { gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true }
+const defaultSettings: Settings = {
+  gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true,
+  tracker: { provider: 'none', authMethod: 'oauth', linearApiKey: '', linearClientId: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0, stateOnStart: 'In Progress' }
+}
+// Secrets are encrypted at rest with the OS keychain when available (Electron safeStorage).
+const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken'] as const
+const enc = (v: string): string => (v && safeStorage.isEncryptionAvailable() ? 'enc:' + safeStorage.encryptString(v).toString('base64') : v)
+const dec = (v: string): string => { try { return v?.startsWith('enc:') && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(v.slice(4), 'base64')) : v ?? '' } catch { return '' } }
 function loadSettings(): Settings {
-  try { return { ...defaultSettings, ...JSON.parse(readFileSync(settingsFile(), 'utf8')) } } catch { return { ...defaultSettings } }
+  try {
+    const s = JSON.parse(readFileSync(settingsFile(), 'utf8'))
+    const tracker = { ...defaultSettings.tracker, ...(s.tracker ?? {}) } as Settings['tracker']
+    for (const f of SECRET_FIELDS) tracker[f] = dec(tracker[f])
+    return { ...defaultSettings, ...s, tracker }
+  } catch { return { ...defaultSettings } }
+}
+function writeSettings(merged: Settings): void {
+  mkdirSync(dirname(settingsFile()), { recursive: true })
+  const onDisk = { ...merged, tracker: { ...merged.tracker } }
+  for (const f of SECRET_FIELDS) onDisk.tracker[f] = enc(onDisk.tracker[f])
+  writeFileSync(settingsFile(), JSON.stringify(onDisk, null, 2))
+}
+/** The renderer never receives token values, only whether they exist. */
+function publicSettings(s: Settings): Settings {
+  return { ...s, tracker: { ...s.tracker, linearAccessToken: s.tracker.linearAccessToken ? '***' : '', linearRefreshToken: s.tracker.linearRefreshToken ? '***' : '' } }
 }
 function saveSettings(s: Settings): Settings {
-  mkdirSync(dirname(settingsFile()), { recursive: true })
-  const merged = { ...defaultSettings, ...s }
-  writeFileSync(settingsFile(), JSON.stringify(merged, null, 2))
+  const current = loadSettings()
+  const tracker = { ...defaultSettings.tracker, ...(s.tracker ?? {}) } as Settings['tracker']
+  // keep stored tokens unless the renderer explicitly clears them
+  if (tracker.linearAccessToken === '***') tracker.linearAccessToken = current.tracker.linearAccessToken
+  if (tracker.linearRefreshToken === '***') tracker.linearRefreshToken = current.tracker.linearRefreshToken
+  if (!tracker.linearAccessToken) tracker.linearTokenExpiry = 0
+  const merged = { ...defaultSettings, ...s, tracker }
+  writeSettings(merged)
   git.setGitExecutable(merged.gitPath)
-  return merged
+  configureTracker(merged.tracker, persistTokens)
+  return publicSettings(merged)
+}
+function persistTokens(patch: Partial<Settings['tracker']>): void {
+  const s = loadSettings(); s.tracker = { ...s.tracker, ...patch }; writeSettings(s)
 }
 
 // ---------- file watching ----------
@@ -86,6 +129,10 @@ function createWindow(): BrowserWindow {
   })
   if (process.env.PAKGIT_SCREENSHOT) {
     win.webContents.once('did-finish-load', () => setTimeout(async () => {
+      if (process.env.PAKGIT_SCREENSHOT_EVAL) {
+        try { console.log('eval:', JSON.stringify(await win.webContents.executeJavaScript(process.env.PAKGIT_SCREENSHOT_EVAL))) }
+        catch (e) { console.log('eval error:', e instanceof Error ? e.message : String(e)) }
+      }
       const img = await win.webContents.capturePage()
       writeFileSync(process.env.PAKGIT_SCREENSHOT!, img.toPNG())
       console.log(`screenshot written to ${process.env.PAKGIT_SCREENSHOT}`)
@@ -93,8 +140,11 @@ function createWindow(): BrowserWindow {
     }, Number(process.env.PAKGIT_SCREENSHOT_DELAY ?? 4000)))
   }
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' } })
-  const query = process.env.PAKGIT_SCREENSHOT_SELECT ? { select: process.env.PAKGIT_SCREENSHOT_SELECT } : undefined
-  if (process.env['ELECTRON_RENDERER_URL']) win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (query ? `?select=${encodeURIComponent(query.select)}` : ''))
+  const query: Record<string, string> = {}
+  if (process.env.PAKGIT_SCREENSHOT_SELECT) query.select = process.env.PAKGIT_SCREENSHOT_SELECT
+  if (process.env.PAKGIT_SCREENSHOT_PERSPECTIVE) query.perspective = process.env.PAKGIT_SCREENSHOT_PERSPECTIVE
+  const qs = Object.keys(query).length ? '?' + new URLSearchParams(query).toString() : ''
+  if (process.env['ELECTRON_RENDERER_URL']) win.loadURL(process.env['ELECTRON_RENDERER_URL'] + qs)
   else win.loadFile(join(__dirname, '../renderer/index.html'), { query })
   return win
 }
@@ -145,6 +195,7 @@ function buildMenu(): void {
         { label: 'Standard Window', accelerator: 'CmdOrCtrl+1', click: send('view:standard') },
         { label: 'Log Window', accelerator: 'CmdOrCtrl+2', click: send('view:log') },
         { label: 'Working Tree Window', accelerator: 'CmdOrCtrl+3', click: send('view:worktree') },
+        { label: 'Release Window', accelerator: 'CmdOrCtrl+4', click: send('view:release') },
         { type: 'separator' },
         { label: 'Toggle Theme', click: send('view:theme') },
         { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: send('view:settings') },
@@ -197,6 +248,28 @@ function registerIpc(): void {
     const entry = await registerRepo(path)
     await watchRepo(entry.path)
     return entry
+  })
+  handle('repos:groups', () => loadGroups())
+  handle('repos:createGroup', (name: string) => {
+    const n = name.trim()
+    if (!n) throw new Error('Group name is empty')
+    const list = loadGroups()
+    if (!list.includes(n)) { list.push(n); saveGroups(list) }
+    return list
+  })
+  handle('repos:renameGroup', (oldName: string, newName: string) => {
+    const n = newName.trim()
+    if (!n) throw new Error('Group name is empty')
+    saveGroups(loadGroups().map((g) => (g === oldName ? n : g)).filter((g, i, a) => a.indexOf(g) === i))
+    saveRepos(loadRepos().map((r) => (r.group === oldName ? { ...r, group: n } : r)))
+  })
+  handle('repos:deleteGroup', (name: string) => {
+    saveGroups(loadGroups().filter((g) => g !== name))
+    saveRepos(loadRepos().map((r) => (r.group === name ? { ...r, group: null } : r)))
+  })
+  handle('repos:setGroup', (path: string, group: string | null) => {
+    if (group && !loadGroups().includes(group)) saveGroups([...loadGroups(), group])
+    saveRepos(loadRepos().map((r) => (r.path === path ? { ...r, group } : r)))
   })
   handle('dialog:directory', async (title?: string) => {
     const r = await dialog.showOpenDialog({ title: title ?? 'Select Directory', properties: ['openDirectory', 'createDirectory'] })
@@ -263,8 +336,46 @@ function registerIpc(): void {
     const r = await dialog.showOpenDialog({ title, properties: ['openFile'] })
     return r.canceled ? null : r.filePaths[0] ?? null
   })
-  handle('settings:get', () => loadSettings())
+  handle('release:config', (repo: string) => release.releaseConfig(repo))
+  handle('release:saveConfig', (repo: string, cfg: Parameters<typeof release.saveReleaseConfig>[1]) => release.saveReleaseConfig(repo, cfg))
+  handle('release:analyze', (repo: string) => release.analyze(repo))
+  handle('release:promote', (repo: string, env: string, items: release.PromoteInput[], push: boolean) => release.promote(repo, env, items, push))
+  handle('release:start', (repo: string, env: string, name: string, items: release.PromoteInput[], push: boolean) => release.startRelease(repo, env, name, items, push))
+  handle('release:finish', (repo: string, env: string, branch: string, tag: string | null, push: boolean) => release.finishRelease(repo, env, branch, tag, push))
+  handle('release:detectConfig', (repo: string) => release.detectConfig(repo))
+  handle('release:sync', (repo: string, push: boolean) => release.syncEnvironments(repo, push))
+  handle('release:prepareBranch', (repo: string, env: string, target: BranchTarget, items: release.PromoteInput[], options: PrepareOptions) => release.prepareBranch(repo, env, target, items, options))
+  handle('release:setArchived', (repo: string, ids: string[], archived: boolean) => release.setArchived(repo, ids, archived))
+  handle('release:setOverrides', (repo: string, id: string, o: Record<string, boolean> | null) => release.setOverrides(repo, id, o))
+  handle('release:openFeaturePRs', (repo: string, env: string, items: release.PromoteInput[]) => release.openFeaturePRs(repo, env, items))
+  handle('release:openPR', (repo: string, head: string, base: string, title: string, body: string) => release.openPullRequest(repo, head, base, title, body))
+  handle('release:startIssue', (repo: string, _key: string, branchName: string) => release.startIssue(repo, branchName))
+  handle('release:enableRerere', (repo: string) => release.enableRerere(repo))
+  handle('tracker:status', () => tracker().status())
+  handle('tracker:issues', (keys: string[]) => tracker().getIssues(keys))
+  handle('tracker:myIssues', () => tracker().myActiveIssues())
+  handle('tracker:setState', (key: string, state: string) => tracker().setState(key, state))
+  handle('tracker:states', (key: string) => tracker().states(key))
+  handle('settings:get', () => publicSettings(loadSettings()))
   handle('settings:save', (s: Settings) => saveSettings(s))
+  handle('tracker:login', async () => {
+    const s = loadSettings()
+    try {
+      const patch = await linearLogin(s.tracker)
+      persistTokens({ ...patch, authMethod: 'oauth' })
+      configureTracker(loadSettings().tracker, persistTokens)
+      const st = await tracker().status()
+      for (const w of BrowserWindow.getAllWindows()) { w.show(); w.focus() }
+      return { ok: !st.error, account: st.account, error: st.error }
+    } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) } }
+  })
+  handle('tracker:logout', async () => {
+    const s = loadSettings()
+    await linearLogout(s.tracker)
+    persistTokens({ linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0 })
+    configureTracker(loadSettings().tracker, persistTokens)
+  })
+  handle('tracker:redirectUrl', () => OAUTH_REDIRECT)
   handle('git:applyPatch', (repo: string, patch: string, o: { cached: boolean; reverse?: boolean }) => git.applyPatch(repo, patch, o))
   handle('git:resolveConflict', (repo: string, path: string, side: 'ours' | 'theirs') => git.resolveConflict(repo, path, side))
   handle('git:markResolved', (repo: string, paths: string[]) => git.markResolved(repo, paths))
@@ -292,6 +403,9 @@ function registerIpc(): void {
 app.whenReady().then(() => {
   git.setLogSink((line) => broadcast('git:log', line))
   git.setGitExecutable(loadSettings().gitPath)
+  configureTracker(loadSettings().tracker, persistTokens)
+  release.setReleaseConfigDir(app.getPath('userData'))
+  release.setPrOpener((url) => shell.openExternal(url))
   registerIpc()
   buildMenu()
   createWindow()

@@ -7,31 +7,38 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "dist": "electron-vite build && electron-builder",
-    "dist:mac": "electron-vite build && electron-builder --mac",
-    "dist:win": "electron-vite build && electron-builder --win",
-    "dist:linux": "electron-vite build && electron-builder --linux",
-    "test:backend": "esbuild src/main/git.ts --bundle --platform=node --format=cjs --alias:@shared=./src/shared --outfile=out/test/git.cjs --log-level=error && node test/git-backend.test.cjs"
+    "dev": "concurrently -k -n ng,electron \"ng serve\" \"wait-on http://localhost:4200 && electron-vite build && cross-env ELECTRON_RENDERER_URL=http://localhost:4200 electron .\"",
+    "build": "ng build && electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && ng build --configuration development",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "test:backend": "esbuild src/main/git.ts --bundle --platform=node --format=cjs --alias:@shared=./src/shared --outfile=out/test/git.cjs --log-level=error && esbuild src/main/release.ts --bundle --platform=node --format=cjs --alias:@shared=./src/shared --outfile=out/test/release.cjs --log-level=error && node test/git-backend.test.cjs && node test/release.test.cjs",
+    "build:renderer": "ng build"
   },
   "dependencies": {
-    "chokidar": "^4.0.1"
+    "chokidar": "^4.0.1",
+    "@angular/common": "^22.2.0",
+    "@angular/compiler": "^22.2.0",
+    "@angular/core": "^22.2.0",
+    "@angular/forms": "^22.2.0",
+    "@angular/platform-browser": "^22.2.0",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
     "electron-vite": "^3.0.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "typescript": "^5.6.3",
-    "vite": "^6.0.1",
-    "esbuild": "^0.24.0"
+    "typescript": "~6.0.2",
+    "esbuild": "^0.24.0",
+    "@angular/build": "^22.2.6",
+    "@angular/cli": "^22.2.6",
+    "@angular/compiler-cli": "^22.2.0",
+    "concurrently": "^9.1.0",
+    "wait-on": "^8.0.1",
+    "cross-env": "^7.0.3"
   }
 }
