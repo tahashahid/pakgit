@@ -1,81 +1,63 @@
 import { Component, computed, effect, inject } from '@angular/core'
 import { Store } from '../store.service'
 import { Icon } from '../ui/icon'
-import { TimeAgoPipe } from '../ui/time-ago'
-import type { RepoOverviewCard } from '@shared/types'
+import { OrgOverview } from './org-overview'
+import { OrgWork } from './org-work'
+import { OrgReady } from './org-ready'
 
-/** Organization perspective, phase 1: overview cards per repository. */
+/** Organization perspective: header with the tabs (Overview · Work · Ready) and the group chips. */
 @Component({
   selector: 'pg-organization',
-  imports: [Icon, TimeAgoPipe],
+  imports: [Icon, OrgOverview, OrgWork, OrgReady],
   template: `
     <div class="org-view">
       <div class="org-header">
         <h2><span class="org-dot" [style.background]="store.org()?.color ?? '#888'"></span>{{ store.org()?.name ?? 'Personal' }}</h2>
+        <div class="seg org-tabs">
+          <button class="btn small" [class.active]="store.orgTab() === 'overview'" (click)="store.orgTab.set('overview')">Overview</button>
+          <button class="btn small" [class.active]="store.orgTab() === 'work'" (click)="store.orgTab.set('work')" title="Issues from the tracker across every repository">Work</button>
+          <button class="btn small" [class.active]="store.orgTab() === 'ready'" (click)="store.orgTab.set('ready')" title="Everything waiting for an environment, in one table">Ready @if (readyTotal() !== null) { <span class="badge">{{ readyTotal() }}</span> }</button>
+        </div>
+        @if (store.groups().length) {
+          <div class="chips">
+            <button class="chip" [class.active]="!store.orgGroup()" (click)="store.orgGroup.set(null)">All</button>
+            @for (g of store.groups(); track g) { <button class="chip" [class.active]="store.orgGroup() === g" (click)="store.orgGroup.set(store.orgGroup() === g ? null : g)">{{ g }}</button> }
+          </div>
+        }
         <span class="muted">{{ store.repos().length }} repositories</span>
         @if (store.trackerStatus(); as ts) {
           @if (ts.configured && !ts.error) { <span class="chip ok" [title]="ts.account">Linear ✓</span> }
           @else if (ts.error) { <span class="chip bad" [title]="ts.error">Linear: error</span> }
+          @else if (ts.provider !== 'none') { <button class="btn small ghost" (click)="store.showOrgConfig.set('integrations')">Linear: sign in</button> }
         }
+        @if (store.indexLoading() || store.overviewLoading()) { <span class="busy" title="Analysing repositories"><span class="spinner"></span></span> }
         <span style="flex:1"></span>
-        <button class="btn small" (click)="fetchAll()" [disabled]="store.busy() !== null" title="Fetch every repository"><pg-icon name="fetch" [size]="14" />Fetch all</button>
-        <button class="btn small" (click)="store.loadOverview()" [disabled]="store.overviewLoading()" title="Recompute"><pg-icon name="refresh" [size]="14" /></button>
+        <button class="btn small" (click)="fetchAll()" [disabled]="store.busy() !== null" title="Fetch every repository, then re-analyse"><pg-icon name="fetch" [size]="14" />Fetch all</button>
+        <button class="btn small" (click)="refresh()" [disabled]="store.indexLoading()" title="Re-analyse every repository (bypasses the cache) and reload tracker data"><pg-icon name="refresh" [size]="14" /></button>
+        <button class="btn small" (click)="store.showQuickOpen.set(true)" title="Quick open (Cmd/Ctrl+K)"><pg-icon name="search" [size]="14" /></button>
         <button class="btn small" (click)="store.showOrgConfig.set('general')"><pg-icon name="gear" [size]="14" />Configure…</button>
         <button class="btn small ghost" (click)="store.showNewOrg.set(true)">New organization…</button>
       </div>
-
-      @if (store.overview(); as ov) {
-        <div class="org-stats">
-          @for (r of ov.totals.ready; track r.id) { <span>→ {{ r.name }}: <b>{{ r.count }}</b></span> }
-          <span>unreleased: <b>{{ ov.totals.unreleased }}</b></span>
-          @if (ov.totals.warnings) { <span style="color:var(--warning)">⚠ {{ ov.totals.warnings }} warning(s)</span> }
-          <span class="muted">computed {{ iso(ov.generatedAt) | timeAgo }}</span>
-        </div>
-        @for (g of groups(ov.repos); track g.name) {
-          @if (g.name) { <div class="org-group-title">{{ g.name }}</div> }
-          <div class="cards">
-            @for (c of g.cards; track c.repo.path) {
-              <div class="card" [class.err]="c.error" (click)="open(c)" [title]="c.repo.path">
-                <div class="title"><pg-icon name="folder" [size]="14" />{{ c.repo.name }}@if (c.repo.remote) { <span class="muted mono" style="font-size:11px">{{ shortRemote(c.repo.remote) }}</span> }</div>
-                @if (c.error) { <div class="warn">{{ c.error }}</div> }
-                @else {
-                  <div class="line">
-                    <span>on <b>{{ c.detached ? 'detached HEAD' : c.branch }}</b></span>
-                    <span>{{ c.changed ? c.changed + ' changed' : 'clean' }}</span>
-                    @if (c.ahead || c.behind) { <span>↑{{ c.ahead }} ↓{{ c.behind }}</span> }
-                    @if (c.state && c.state !== 'clean') { <span style="color:var(--warning)">{{ c.state }}</span> }
-                    <span>{{ c.lastFetch ? 'fetched ' + (iso(c.lastFetch) | timeAgo) : 'never fetched' }}</span>
-                  </div>
-                  <div class="envs">
-                    @for (e of c.environments ?? []; track e.id) { <span [class.hot]="e.ready > 0" [class.missing]="e.missing" [title]="e.missing ? 'Branch ' + e.branch + ' not found' : 'Ready for ' + e.branch">→ {{ e.branch }} {{ e.ready }}</span> }
-                  </div>
-                  @if (c.drift) { <div class="warn">⚠ {{ c.drift.from }} is {{ c.drift.commits }} commits ahead of {{ c.drift.to }} (sync needed)</div> }
-                  @if (c.devBased) { <div class="warn">⚠ {{ c.devBased }} unreleased branch(es) cut from dev</div> }
-                  @if (c.staleReleaseBranches?.length) { <div class="warn">⚠ {{ c.staleReleaseBranches!.length }} release branch(es) not merged: {{ c.staleReleaseBranches!.slice(0, 2).join(', ') }}{{ c.staleReleaseBranches!.length > 2 ? '…' : '' }}</div> }
-                }
-              </div>
-            }
-          </div>
-        }
-        @if (!ov.repos.length) { <div class="empty">No repositories in this organization yet. Add some from the Repositories panel, or Configure ▸ Repositories.</div> }
-      } @else if (store.overviewLoading()) { <div class="empty"><span class="spinner"></span> Analysing {{ store.repos().length }} repositories…</div> }
-      @else { <div class="empty">No overview yet.</div> }
+      @switch (store.orgTab()) {
+        @case ('work') { <pg-org-work /> }
+        @case ('ready') { <pg-org-ready /> }
+        @default { <pg-org-overview /> }
+      }
     </div>`
 })
 export class OrganizationView {
   readonly store = inject(Store)
-  constructor() { effect(() => { if (this.store.perspective() === 'organization' && this.store.workspace() && !this.store.overview() && !this.store.overviewLoading()) void this.store.loadOverview() }) }
-  groups(cards: RepoOverviewCard[]): { name: string; cards: RepoOverviewCard[] }[] {
-    const map = new Map<string, RepoOverviewCard[]>()
-    for (const c of cards) { const g = c.repo.group ?? ''; if (!map.has(g)) map.set(g, []); map.get(g)!.push(c) }
-    return [...map.entries()].sort((a, b) => (a[0] === '' ? 1 : b[0] === '' ? -1 : a[0].localeCompare(b[0]))).map(([name, cs]) => ({ name, cards: cs }))
+  readonly readyTotal = computed(() => { const ov = this.store.overview(); return ov ? ov.totals.ready.reduce((n, r) => n + r.count, 0) : null })
+  constructor() {
+    const s = this.store
+    effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.index() && !s.indexLoading() && !s.indexError()) void s.loadIndex() })
+    effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.overview() && !s.overviewLoading() && !s.overviewError()) void s.loadOverview() })
+    void s.refreshTracker()
   }
-  shortRemote(r: string): string { return r.split('/').slice(1).join('/') }
-  iso(ms: number): string { return new Date(ms).toISOString() }
-  open(c: RepoOverviewCard): void { if (c.error) return; this.store.openRepo(c.repo); this.store.perspective.set('standard') }
   async fetchAll(): Promise<void> {
     const repos = this.store.repos()
     await this.store.run(`Fetch ${repos.length} repositories`, async () => { for (const r of repos) await this.store.api.fetch(r.path, undefined, true).catch(() => undefined) }, { success: 'Fetched all repositories' })
-    await this.store.loadOverview()
+    this.refresh()
   }
+  refresh(): void { void this.store.loadIndex(true); void this.store.loadOverview(true) }
 }

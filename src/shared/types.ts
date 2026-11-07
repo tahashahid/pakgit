@@ -196,13 +196,77 @@ export interface RepoOverviewCard {
   devBased?: number
   staleReleaseBranches?: string[]
   unreleased?: number
+  /** issues with a part in this repository that sit on different environments across the organization */
+  partlyPromoted?: number
+  fromCache?: boolean
 }
 export interface OrgOverview {
   org: OrganizationSummary
   repos: RepoOverviewCard[]
-  totals: { ready: { id: string; name: string; count: number }[]; unreleased: number; warnings: number }
+  totals: { ready: { id: string; name: string; count: number }[]; unreleased: number; warnings: number; partlyPromoted: number }
   generatedAt: number
 }
+
+// ---------- work-item index (phase 2): one issue, its parts in every repository ----------
+
+/** One repository's share of an issue: the work item the release analysis found there. */
+export interface WorkPart {
+  repo: string
+  repoName: string
+  group: string | null
+  /** id of the ReleaseItem inside the repository (issue key or normalised branch name) */
+  itemId: string
+  issueKey: string | null
+  name: string
+  branch: string | null
+  ref: string | null
+  branchCount: number
+  /** the repository's environment ids, in pipeline order */
+  envIds: string[]
+  inEnv: Record<string, boolean>
+  /** id of the most stable environment that contains the work, null when nowhere */
+  highest: string | null
+  archived: boolean
+  basedOnEnv: boolean
+  needsCherryPick: boolean
+  own: number | null
+  lastActivity: string
+  overrides: Record<string, boolean>
+  commits: string[]
+  linkedBy: 'branch' | 'commits' | 'manual'
+}
+export interface WorkItem {
+  /** issue key, or "<repo path>::<item id>" for work without a key */
+  id: string
+  issueKey: string | null
+  name: string
+  issue?: TrackerIssue
+  parts: WorkPart[]
+  /** parts sit on different environments */
+  partlyPromoted: boolean
+  lastActivity: string
+}
+export interface IndexRepo {
+  path: string
+  name: string
+  group: string | null
+  remote: string | null
+  environments: { id: string; name: string; branch: string }[]
+  error?: string
+  fromCache?: boolean
+}
+export interface IndexBranch { repo: string; repoName: string; name: string; ref: string; sha: string | null; kind: 'env' | 'release' | 'work' }
+export interface WorkIndex {
+  org: OrganizationSummary
+  repos: IndexRepo[]
+  /** union of the repositories' environments in pipeline order (the organization template when there is one); branch = the template's, else the first repository's */
+  environments: { id: string; name: string; branch: string }[]
+  items: WorkItem[]
+  branches: IndexBranch[]
+  generatedAt: number
+}
+export interface StartWorkRequest { key: string | null; branch: string; repos: string[] }
+export interface StartWorkResult { created: string[]; failed: { repo: string; error: string }[] }
 export interface OrgTrackerStatus extends TrackerStatus { hasApiKey: boolean; signedIn: boolean }
 
 export interface OrganizationApi {
@@ -218,13 +282,19 @@ export interface OrganizationApi {
   orgExport(id: string): Promise<string | null>
   /** reads an organization file through an open dialog */
   orgImport(): Promise<ImportResult | null>
-  orgOverview(id: string): Promise<OrgOverview>
+  orgOverview(id: string, opts?: { refresh?: boolean }): Promise<OrgOverview>
   orgTrackerStatus(id: string): Promise<OrgTrackerStatus>
   orgTrackerSetSecrets(id: string, secrets: { linearApiKey?: string; linearClientSecret?: string }): Promise<void>
   orgTrackerLogin(id: string): Promise<OAuthResult>
   orgTrackerLogout(id: string): Promise<void>
   repoPipeline(repo: string): Promise<RepoPipeline>
   saveRepoPipeline(repo: string, override: RepoPipelineOverride): Promise<EnvConfig>
+  /** the cross-repository work-item index; refresh bypasses the analysis cache */
+  orgIndex(id: string, opts?: { refresh?: boolean }): Promise<WorkIndex>
+  /** create the issue branch in several repositories of the organization */
+  orgStartWork(id: string, req: StartWorkRequest): Promise<StartWorkResult>
+  /** branch name for an issue from the organization's convention (or the tracker's suggestion) */
+  orgSuggestBranch(id: string, issue: { key: string; title: string; branchName?: string }): Promise<string>
 }
 
 export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
@@ -329,9 +399,30 @@ export interface TrackerIssue {
   statusType: 'backlog' | 'unstarted' | 'started' | 'completed' | 'canceled' | 'unknown'
   url: string
   assignee?: string
+  /** the signed-in person is the assignee */
+  assigneeIsMe?: boolean
   /** branch name suggested by the tracker (Linear "copy git branch name") */
   branchName?: string
+  /** team key, e.g. CYB4 */
+  team?: string
+  updatedAt?: string
+  priority?: number
 }
+
+export interface TrackerTeam { key: string; name: string }
+/** Filters for the Work tab; every field is optional (empty = no filter). */
+export interface IssueQuery {
+  teams?: string[]
+  /** state names, e.g. ["In Progress", "QA"] */
+  states?: string[]
+  stateTypes?: TrackerIssue['statusType'][]
+  assignee?: 'me' | 'anyone' | 'unassigned'
+  updatedWithinDays?: number
+  activeCycle?: boolean
+  first?: number
+  after?: string
+}
+export interface IssuePage { issues: TrackerIssue[]; nextCursor: string | null }
 
 export interface TrackerStatus {
   provider: TrackerId
@@ -428,6 +519,8 @@ export interface ReleaseItem {
   archived: boolean
   /** manual corrections of inEnv (environment id -> true/false), when PakGit cannot see a merge */
   overrides: Record<string, boolean>
+  /** ids of branch items that were linked to this issue by hand (Link to issue…) */
+  linkedFrom: string[]
 }
 
 export interface BranchTarget { name: string; existing: boolean }
@@ -443,6 +536,8 @@ export interface ReleaseAnalysis {
   releaseBranches: ReleaseBranchRef[]
   currentBranch: string | null
   rerere: boolean
+  /** served from the tip-keyed analysis cache */
+  fromCache?: boolean
 }
 
 export interface PromoteResult {
@@ -462,7 +557,8 @@ export interface ReleaseApi {
   releaseConfig(repo: string): Promise<EnvConfig>
   detectReleaseConfig(repo: string): Promise<EnvConfig>
   saveReleaseConfig(repo: string, cfg: EnvConfig): Promise<EnvConfig>
-  releaseAnalyze(repo: string): Promise<ReleaseAnalysis>
+  /** refresh bypasses the tip-keyed analysis cache and re-fetches tracker data */
+  releaseAnalyze(repo: string, opts?: { refresh?: boolean }): Promise<ReleaseAnalysis>
   /** merge feature branches (or cherry-pick their commits) into an environment's branch */
   promote(repo: string, envId: string, items: { id: string; ref: string | null; commits: string[] }[], push: boolean): Promise<PromoteResult>
   /** create a release branch cut from the environment's branch containing the given items, push it and open a pull request */
@@ -471,6 +567,8 @@ export interface ReleaseApi {
   prepareBranch(repo: string, envId: string, target: BranchTarget, items: { id: string; ref: string | null; commits: string[] }[], options: PrepareOptions): Promise<PromoteResult & { remaining?: { id: string; ref: string | null; commits: string[] }[] }>
   setArchived(repo: string, ids: string[], archived: boolean): Promise<void>
   setOverrides(repo: string, id: string, overrides: Record<string, boolean> | null): Promise<void>
+  /** link a branch item that carries no issue key to an issue (null removes the link) */
+  setLink(repo: string, itemId: string, issueKey: string | null): Promise<void>
   /** open one pull request per feature branch into the environment */
   openFeaturePRs(repo: string, envId: string, items: { id: string; ref: string | null; commits: string[] }[]): Promise<PromoteResult>
   /** compute the hosting provider's pull-request page for head → base (and open it in the browser) */
@@ -492,4 +590,7 @@ export interface ReleaseApi {
   trackerMyIssues(): Promise<TrackerIssue[]>
   trackerSetState(key: string, stateName: string): Promise<void>
   trackerStates(key: string): Promise<string[]>
+  trackerListIssues(q: IssueQuery): Promise<IssuePage>
+  trackerTeams(): Promise<TrackerTeam[]>
+  trackerAssignToMe(key: string): Promise<void>
 }

@@ -1,12 +1,25 @@
 # Organizations — design proposal (revision 2)
 
-Status: phase 1 implemented (see section 12); phases 2–4 are proposals. Revision 2 after a
-critical second pass; the changes from revision 1 are listed at the end (section 14).
+Status: phases 1 and 2 implemented (see section 12); phases 3–4 are proposals. Revision 2
+after a critical second pass; the changes from revision 1 are listed at the end (section 14).
 
-Phase 1 notes: per-repository state (pipeline override, archive, tracking overrides) is still
-keyed by local path rather than by remote identity; moving to `repos/<identity-hash>/` is
-planned with the analysis cache in phase 2. Repositories carry their remote identity already,
-so export/import works by remote URL.
+Phase 2 notes (what shipped, and where it differs from the proposal):
+- Per-repository state now lives in `repos/<slug>-<hash>/` keyed by the normalised remote URL
+  (`pipeline.json`, `archive.json`, `overrides.json`, `links.json`, `analysis-cache.json`,
+  `meta.json`). Entries of the old flat files move over on first use; repositories without a
+  remote are keyed by path.
+- The analysis cache is keyed on every ref tip plus the pipeline, archive, overrides, links
+  and issue prefixes; HEAD and tracker data are re-read on every call. Refresh bypasses it.
+- Issue-key prefixes are shared across the organization: a prefix seen with two or more
+  numbers anywhere in the organization counts in every repository (linking rules 1–2 then
+  find CYB4-1 in a repository that holds only that one CYB4 branch).
+- Linking rule 3 (the tracker's branch name) is applied in the Work tab for issues loaded from
+  the tracker; rule 6 is *Link branch…* (Work) / *Link to issue…* (Ready and Release rows).
+- The Ready tab promotes one repository at a time: *Promote selected…* opens that repository's
+  Release view with the items ticked. Cross-repository promotion and releases stay in phase 3.
+- Quick open took Cmd/Ctrl+K; *Commit…* moved to Cmd/Ctrl+Shift+K.
+- Work rows are the tracker issues matching the filters plus every issue found in git that the
+  tracker list did not include, so the tab also works without a tracker.
 
 ## 1. The problem
 
@@ -417,7 +430,7 @@ worth the most test coverage because mistakes there are silent.
 - Done when: a user with today's data sees no difference until they create an organization;
   CyberNut can be created in two clicks and shared as one file.
 
-### Phase 2 — Planning across repositories
+### Phase 2 — Planning across repositories (implemented)
 - Work-item index with linking rules 1–3 and 6 (manual link); analysis cache.
 - Work tab (tracker issues × repositories, filters, state change, assign to me, Start work in
   several repositories, Link branch).

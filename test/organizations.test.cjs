@@ -1,4 +1,4 @@
-const org = require('../out/test/organizations.cjs')
+const org = require('../out/test/backend.cjs').organizations
 const fs = require('fs'), path = require('path'), os = require('os')
 const assert = require('assert')
 

@@ -128,6 +128,20 @@ nothing else is needed. Optionally, after a release, **rebuild `dev`**: reset `d
 to `main` and re-merge the still-open feature branches. This removes leftovers and is
 safe because every branch still exists.
 
+### Working across repositories
+
+An issue often touches more than one repository (the admin portal and a lambda, say). The
+Organization window (Cmd/Ctrl+5) puts every repository of the organization in one place:
+
+- **Work** lists the Linear issues with one column per repository. A cell shows the highest
+  environment the issue has reached there, or "—" when nothing has been started. *Start work…*
+  creates the same branch name in several repositories at once; *Link branch…* attaches a
+  branch that follows no naming convention to its issue.
+- **Ready** is the release table across repositories. An issue whose parts sit on different
+  environments is marked *partly promoted*: promote the lagging repository before releasing.
+  *Promote selected…* opens that repository's Release view with the items ticked.
+- Quick open (Cmd/Ctrl+K) jumps to any repository, branch, issue or release branch.
+
 ## Rules that keep conflicts rare
 
 | Rule | Why |

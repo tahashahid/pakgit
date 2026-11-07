@@ -19,7 +19,7 @@ import { Icon } from '../ui/icon'
         <button class="btn" title="Fetch" [disabled]="disabled()" (click)="a.fetch()"><pg-icon name="fetch" /><span class="lbl">Fetch</span> @if (store.status()?.behind) { <span class="badge">↓{{ store.status()!.behind }}</span> }</button>
       </div>
       <div class="tool-group">
-        <button class="btn" title="Commit (Cmd/Ctrl+K)" [disabled]="disabled()" (click)="a.focusCommit()"><pg-icon name="commit" /><span class="lbl">Commit</span></button>
+        <button class="btn" title="Commit (Cmd/Ctrl+Shift+K)" [disabled]="disabled()" (click)="a.focusCommit()"><pg-icon name="commit" /><span class="lbl">Commit</span></button>
         <button class="btn" title="Stash changes" [disabled]="disabled()" (click)="a.stash()"><pg-icon name="stash" /><span class="lbl">Stash</span></button>
         <button class="btn" title="Add branch" [disabled]="disabled()" (click)="a.addBranch()"><pg-icon name="branch" /><span class="lbl">Branch</span></button>
         <button class="btn" title="Merge" [disabled]="disabled()" (click)="a.merge()"><pg-icon name="merge" /><span class="lbl">Merge</span></button>
@@ -37,6 +37,7 @@ import { Icon } from '../ui/icon'
         <button class="btn small" [class.active]="store.perspective() === 'release'" title="Release planning (Cmd/Ctrl+4)" (click)="store.perspective.set('release')">Release</button>
         <button class="btn small" [class.active]="store.perspective() === 'organization'" title="Organization overview (Cmd/Ctrl+5)" (click)="store.perspective.set('organization')">Organization</button>
       </div>
+      <button class="btn small ghost" title="Quick open: repository, branch, issue or release (Cmd/Ctrl+K)" (click)="store.showQuickOpen.set(true)"><pg-icon name="search" /></button>
       <button class="btn small ghost" title="Toggle theme" (click)="store.toggleTheme()"><pg-icon [name]="store.theme() === 'dark' ? 'sun' : 'moon'" /></button>
       <button class="btn small ghost" title="Settings (Cmd/Ctrl+,)" (click)="store.showSettings.set(true)"><pg-icon name="gear" /></button>
     </div>`

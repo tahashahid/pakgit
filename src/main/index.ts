@@ -7,9 +7,10 @@ import * as git from './git'
 import * as release from './release'
 import * as orgs from './organizations'
 import { overview as orgOverview } from './overview'
+import * as workindex from './workindex'
 import { configureTrackerFor, setActiveTrackerOrg, tracker, trackerFor } from './tracker'
 import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
-import type { BranchTarget, CommitOptions, DiffRequest, FileArea, OrgExport, Organization, PrepareOptions, RepoEntry, RepoPipelineOverride, TrackerAuth, TrackerConfig, TrackerSettings } from '@shared/types'
+import type { BranchTarget, CommitOptions, DiffRequest, FileArea, IssueQuery, OrgExport, Organization, PrepareOptions, RepoEntry, RepoPipelineOverride, StartWorkRequest, TrackerAuth, TrackerConfig, TrackerSettings } from '@shared/types'
 
 // ---------- repository registry (per organization, see organizations.ts) ----------
 
@@ -189,7 +190,7 @@ function buildMenu(): void {
     {
       label: 'Local',
       submenu: [
-        { label: 'Commit…', accelerator: 'CmdOrCtrl+K', click: send('local:commit') },
+        { label: 'Commit…', accelerator: 'CmdOrCtrl+Shift+K', click: send('local:commit') },
         { label: 'Stage All', accelerator: 'CmdOrCtrl+Shift+A', click: send('local:stage-all') },
         { label: 'Stash…', accelerator: 'CmdOrCtrl+Shift+S', click: send('local:stash') },
         { type: 'separator' },
@@ -200,6 +201,8 @@ function buildMenu(): void {
     {
       label: 'View',
       submenu: [
+        { label: 'Quick Open…', accelerator: 'CmdOrCtrl+K', click: send('view:quick-open') },
+        { type: 'separator' },
         { label: 'Standard Window', accelerator: 'CmdOrCtrl+1', click: send('view:standard') },
         { label: 'Log Window', accelerator: 'CmdOrCtrl+2', click: send('view:log') },
         { label: 'Working Tree Window', accelerator: 'CmdOrCtrl+3', click: send('view:worktree') },
@@ -307,7 +310,10 @@ function registerIpc(): void {
     configureOrgTracker(res.org.id)
     return res
   })
-  handle('org:overview', (id: string) => orgOverview(id))
+  handle('org:overview', (id: string, opts?: { refresh?: boolean }) => orgOverview(id, { refresh: !!opts?.refresh, tracker: trackerFor(id) }))
+  handle('org:index', (id: string, opts?: { refresh?: boolean }) => workindex.index(id, { refresh: !!opts?.refresh, tracker: trackerFor(id) }))
+  handle('org:startWork', (id: string, req: StartWorkRequest) => workindex.startWork(id, req))
+  handle('org:suggestBranch', (id: string, issue: { key: string; title: string; branchName?: string }) => workindex.suggestBranch(id, issue))
   handle('org:trackerStatus', async (id: string) => {
     const cfg = orgs.getOrg(id).tracker; const auth = loadAuth(id, cfg.provider)
     const st = await trackerFor(id).status()
@@ -383,8 +389,10 @@ function registerIpc(): void {
   handle('git:stashSave', (repo: string, msg?: string, u?: boolean) => git.stashSave(repo, msg, u))
   handle('git:stashApply', (repo: string, i: number, pop?: boolean) => git.stashApply(repo, i, pop))
   handle('git:stashDrop', (repo: string, i: number) => git.stashDrop(repo, i))
-  handle('git:addRemote', (repo: string, n: string, u: string) => git.addRemote(repo, n, u))
-  handle('git:removeRemote', (repo: string, n: string) => git.removeRemote(repo, n))
+  // the remote identity keys the repository's planning state: refresh it when remotes change
+  const remoteChanged = async (repo: string): Promise<void> => { release.forgetIdentity(repo); if (orgs.findRepo(repo)) orgs.setRepoRemote(repo, await remoteIdentity(repo)) }
+  handle('git:addRemote', async (repo: string, n: string, u: string) => { await git.addRemote(repo, n, u); await remoteChanged(repo) })
+  handle('git:removeRemote', async (repo: string, n: string) => { await git.removeRemote(repo, n); await remoteChanged(repo) })
   handle('git:version', () => git.version())
   handle('git:submodules', (repo: string) => git.submodules(repo))
   handle('git:submoduleUpdate', (repo: string, paths?: string[]) => git.submoduleUpdate(repo, paths))
@@ -405,7 +413,10 @@ function registerIpc(): void {
   })
   handle('release:config', (repo: string) => release.releaseConfig(repo))
   handle('release:saveConfig', (repo: string, cfg: Parameters<typeof release.saveReleaseConfig>[1]) => release.saveReleaseConfig(repo, cfg))
-  handle('release:analyze', (repo: string) => release.analyze(repo))
+  handle('release:analyze', async (repo: string, opts?: { refresh?: boolean }) => {
+    const orgId = orgs.orgOfRepo(repo)
+    return release.analyze(repo, { cache: !opts?.refresh, tracker: trackerFor(orgId), prefixes: await workindex.prefixHint(orgId, trackerFor(orgId)) })
+  })
   handle('release:promote', (repo: string, env: string, items: release.PromoteInput[], push: boolean) => release.promote(repo, env, items, push))
   handle('release:start', (repo: string, env: string, name: string, items: release.PromoteInput[], push: boolean) => release.startRelease(repo, env, name, items, push))
   handle('release:finish', (repo: string, env: string, branch: string, tag: string | null, push: boolean) => release.finishRelease(repo, env, branch, tag, push))
@@ -414,6 +425,7 @@ function registerIpc(): void {
   handle('release:prepareBranch', (repo: string, env: string, target: BranchTarget, items: release.PromoteInput[], options: PrepareOptions) => release.prepareBranch(repo, env, target, items, options))
   handle('release:setArchived', (repo: string, ids: string[], archived: boolean) => release.setArchived(repo, ids, archived))
   handle('release:setOverrides', (repo: string, id: string, o: Record<string, boolean> | null) => release.setOverrides(repo, id, o))
+  handle('release:setLink', (repo: string, id: string, key: string | null) => release.setLink(repo, id, key))
   handle('release:openFeaturePRs', (repo: string, env: string, items: release.PromoteInput[]) => release.openFeaturePRs(repo, env, items))
   handle('release:openPR', (repo: string, head: string, base: string, title: string, body: string) => release.openPullRequest(repo, head, base, title, body))
   handle('release:startIssue', (repo: string, _key: string, branchName: string) => release.startIssue(repo, branchName))
@@ -423,6 +435,9 @@ function registerIpc(): void {
   handle('tracker:myIssues', () => tracker().myActiveIssues())
   handle('tracker:setState', (key: string, state: string) => tracker().setState(key, state))
   handle('tracker:states', (key: string) => tracker().states(key))
+  handle('tracker:listIssues', (q: IssueQuery) => tracker().listIssues(q ?? {}))
+  handle('tracker:teams', () => tracker().teams())
+  handle('tracker:assignToMe', (key: string) => tracker().assignToMe(key))
   handle('settings:get', () => loadSettings())
   handle('settings:save', (s: Settings) => saveSettings(s))
   handle('tracker:redirectUrl', () => OAUTH_REDIRECT)
@@ -468,6 +483,7 @@ app.whenReady().then(() => {
   void fillRemotes()
   release.setReleaseConfigDir(app.getPath('userData'))
   release.setTemplateProvider((repo) => { try { return orgs.getOrg(orgs.orgOfRepo(repo)).pipeline } catch { return null } })
+  release.setIdentityProvider((repo) => orgs.findRepo(repo)?.remote ?? undefined)
   release.setPrOpener((url) => shell.openExternal(url))
   registerIpc()
   buildMenu()

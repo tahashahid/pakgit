@@ -15,6 +15,7 @@ import { Release } from './panels/release'
 import { OrganizationView } from './panels/organization'
 import { OrgConfigDialog } from './panels/org-config-dialog'
 import { NewOrgDialog } from './panels/new-org-dialog'
+import { QuickOpen } from './panels/quick-open'
 import { Split } from './ui/split'
 import { Dialog } from './ui/dialog'
 import { Toasts } from './ui/toasts'
@@ -22,7 +23,7 @@ import { ContextMenu } from './ui/context-menu'
 
 @Component({
   selector: 'pg-app',
-  imports: [Toolbar, Repositories, Branches, Files, Changes, Commit, Log, CommitDetails, Output, RebaseDialog, SettingsDialog, Release, OrganizationView, OrgConfigDialog, NewOrgDialog, Split, Dialog, Toasts, ContextMenu],
+  imports: [Toolbar, Repositories, Branches, Files, Changes, Commit, Log, CommitDetails, Output, RebaseDialog, SettingsDialog, Release, OrganizationView, OrgConfigDialog, NewOrgDialog, QuickOpen, Split, Dialog, Toasts, ContextMenu],
   template: `
     <div class="app">
       <pg-toolbar />
@@ -104,6 +105,7 @@ import { ContextMenu } from './ui/context-menu'
       <pg-settings-dialog />
       <pg-org-config-dialog />
       <pg-new-org-dialog />
+      <pg-quick-open />
       <pg-context-menu />
       <pg-toasts />
     </div>`
@@ -122,6 +124,7 @@ export class App {
       'view:release': () => s.perspective.set('release'),
       'view:organization': () => s.perspective.set('organization'),
       'org:switch': () => s.perspective.set('organization'),
+      'view:quick-open': () => s.showQuickOpen.set(true),
       'view:theme': () => s.toggleTheme(), 'view:settings': () => s.showSettings.set(true)
     }
     window.pakgitMenu.on((action) => void map[action]?.())
