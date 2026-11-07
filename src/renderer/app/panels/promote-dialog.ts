@@ -46,6 +46,7 @@ export class PromoteDialog {
   readonly initialEnv = input.required<string>()
   readonly branchNames = input.required<string[]>()
   readonly releasePrefix = input('release/')
+  readonly releasePattern = input('release/{env}-{week}')
   readonly cfgRemote = input('origin')
   readonly closed = output<void>()
   readonly submitted = output<PromoteRequest>()
@@ -59,12 +60,18 @@ export class PromoteDialog {
   readonly env = computed(() => this.envs().find((e) => e.id === this.envId()) ?? null)
   constructor() {
     effect(() => { this.envId.set(this.initialEnv()) })
-    effect(() => { const e = this.env(); if (e && this.mode() === 'new' && (!this.name() || this.name().startsWith(this.releasePrefix()))) this.name.set(`${this.releasePrefix()}${e.branch}-${isoWeek()}`) })
+    effect(() => { const e = this.env(); if (e && this.mode() === 'new' && (!this.name() || this.name().startsWith(this.releasePrefix()))) this.name.set(releaseName(this.releasePattern(), e.branch)) })
   }
   submit(): void {
     const e = this.env(); if (!e) return
     this.submitted.emit({ env: e, target: { name: this.name().trim(), existing: this.mode() === 'existing' }, options: { push: this.push(), openPr: this.push() && this.openPr() } })
   }
+}
+
+/** Fill a release-name pattern: {env}, {week}, {date}, {name} */
+export function releaseName(pattern: string, env: string, name = ''): string {
+  const d = new Date()
+  return (pattern || 'release/{env}-{week}').replace(/\{env\}/g, env).replace(/\{week\}/g, isoWeek(d)).replace(/\{date\}/g, d.toISOString().slice(0, 10)).replace(/\{name\}/g, name).replace(/\{seq\}/g, '').replace(/-+$/, '')
 }
 
 export function isoWeek(d = new Date()): string {

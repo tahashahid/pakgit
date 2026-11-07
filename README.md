@@ -32,6 +32,12 @@ See [ANALYSIS.md](ANALYSIS.md) for the SmartGit feature analysis this design is 
   PRs; start work on a Linear issue from main. The process is documented in
   [docs/WORKFLOW.md](docs/WORKFLOW.md). Issue trackers are pluggable (`src/main/tracker/`);
   Linear is the first provider. Pull-request pages are built for GitHub, GitLab and Bitbucket.
+- **Organizations** (phase 1 of [docs/ORGANIZATIONS.md](docs/ORGANIZATIONS.md)): repositories,
+  groups, a shared pipeline template that repositories inherit and override, conventions and the
+  issue-tracker connection live per organization; a Personal organization holds everything else.
+  Organization overview with per-repository health (ready counts, drift, dev-based branches,
+  unmerged release branches); new-organization wizard from the repositories' hosting owner;
+  export/import of an organization file (remote URLs only, no secrets)
 - Repository groups; branches and tags shown as folders by `/` prefix
 - Repository menu: apply patch, clean working tree
 - **Settings**: git executable, default pull strategy, background fetch interval, log size,
@@ -57,7 +63,8 @@ one component at a time:
 
 ## Connecting Linear
 
-PakGit talks to Linear directly. Two options in Settings ▸ Issue tracker:
+PakGit talks to Linear directly. The connection belongs to an organization (Organization ▸
+Configure… ▸ Integrations); the Personal organization has one too. Two options:
 
 1. **Sign in with Linear** (recommended). Someone in the workspace creates an OAuth application
    once in Linear ▸ Settings ▸ API ▸ OAuth applications with the callback URL

@@ -40,7 +40,7 @@ type Tab = string
         <div class="release-help">
           <b>One branch per issue, cut from <code>{{ baseEnv()?.branch }}</code>, merged as-is into every environment.</b>
           <ol>
-            <li><b>Start</b>: "Start work on issue…" creates the branch from <code>{{ baseEnv()?.branch }}</code>{{ store.settings()?.tracker?.stateOnStart ? ' (tracker → ' + store.settings()!.tracker.stateOnStart + ')' : '' }}.</li>
+            <li><b>Start</b>: "Start work on issue…" creates the branch from <code>{{ baseEnv()?.branch }}</code>{{ store.org()?.tracker?.stateOnStart ? ' (tracker → ' + store.org()!.tracker.stateOnStart + ')' : '' }}.</li>
             @for (e of envs(); track e.id; let i = $index; let first = $first) {
               <li><b>{{ e.name || e.branch }}</b> (<code>{{ e.branch }}</code>):
                 @if (e.strategy === 'feature-pr') { tab <i>To {{ e.name || e.branch }}</i>: tick items and "Open pull requests" opens one PR per feature branch into <code>{{ e.branch }}</code>. Merge with a merge commit (no squash). Resolve conflicts once; rerere replays them later. }
@@ -166,13 +166,13 @@ type Tab = string
       } @else { <div class="empty">Open a repository to plan a release.</div> }
 
       @if (showConfig()) { <pg-env-config-dialog [initial]="cfg()" (closed)="showConfig.set(false)" (saved)="configSaved($event)" /> }
-      @if (promoteItems(); as pi) { <pg-promote-dialog [items]="pi" [envs]="envs()" [initialEnv]="promoteEnvId()" [branchNames]="allBranchNames()" [releasePrefix]="cfg()?.releasePrefix ?? 'release/'" [cfgRemote]="cfg()?.remote ?? 'origin'" (closed)="promoteItems.set(null)" (submitted)="runPromote($event)" /> }
+      @if (promoteItems(); as pi) { <pg-promote-dialog [items]="pi" [envs]="envs()" [initialEnv]="promoteEnvId()" [branchNames]="allBranchNames()" [releasePrefix]="cfg()?.releasePrefix ?? 'release/'" [releasePattern]="store.org()?.conventions?.releasePattern ?? 'release/{env}-{week}'" [cfgRemote]="cfg()?.remote ?? 'origin'" (closed)="promoteItems.set(null)" (submitted)="runPromote($event)" /> }
 
       @if (issuePicker(); as issues) {
         <div class="modal-backdrop" (mousedown)="issuePicker.set(null)">
           <div class="modal wide" (mousedown)="$event.stopPropagation()">
             <h2>Start work on issue</h2>
-            <p class="modal-message">Creates a branch from {{ cfg()?.remote }}/{{ baseEnv()?.branch }} using Linear's branch name{{ updateTracker() ? ', and moves the issue to "' + (store.settings()?.tracker?.stateOnStart ?? 'In Progress') + '"' : '' }}.</p>
+            <p class="modal-message">Creates a branch from {{ cfg()?.remote }}/{{ baseEnv()?.branch }} using Linear's branch name{{ updateTracker() ? ', and moves the issue to "' + (store.org()?.tracker?.stateOnStart ?? 'In Progress') + '"' : '' }}.</p>
             <input class="filter-input" placeholder="Filter my issues…" [value]="issueFilter()" (input)="issueFilter.set($any($event.target).value)" />
             <ul class="list rebase-list" style="max-height:50vh">
               @for (i of filteredIssues(issues); track i.key) {
@@ -450,7 +450,7 @@ export class Release {
     const r = this.store.repo(); if (!r) return
     const res = await this.store.run('Start work', () => this.store.api.startIssue(r.path, key ?? '', branch), { success: `Created ${branch} from ${this.cfg()?.remote}/${this.baseEnv()?.branch}` })
     if (res !== undefined && key && this.updateTracker() && this.trackerOk()) {
-      const state = this.store.settings()?.tracker.stateOnStart
+      const state = this.store.org()?.tracker.stateOnStart
       if (state) await this.store.api.trackerSetState(key, state).catch((e) => this.store.toast('error', `Linear: ${e instanceof Error ? e.message : String(e)}`))
     }
     this.store.perspective.set('standard')

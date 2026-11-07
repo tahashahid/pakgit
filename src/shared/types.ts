@@ -84,6 +84,10 @@ export interface RepoEntry {
   lastOpened: number
   /** optional repository group (see listGroups) */
   group?: string | null
+  /** normalised remote identity, e.g. github.com/project-cybernut/admin-portal-v2; null when the repository has no remote */
+  remote?: string | null
+  /** organization id the repository belongs to (filled by the main process) */
+  org?: string
 }
 
 export interface GitLogLine {
@@ -121,13 +125,112 @@ export interface Settings {
   autoFetchMinutes: number
   logLimit: number
   confirmDiscard: boolean
-  tracker: TrackerSettings
+}
+
+// ---------- organizations ----------
+
+/** Shareable part of a tracker connection (no secrets). */
+export interface TrackerConfig {
+  provider: TrackerId
+  authMethod: 'oauth' | 'apiKey'
+  linearClientId: string
+  stateOnStart: string
+}
+/** Per-person part of a tracker connection, stored encrypted and never exported. */
+export interface TrackerAuth {
+  linearApiKey: string
+  linearClientSecret: string
+  linearAccessToken: string
+  linearRefreshToken: string
+  linearTokenExpiry: number
+}
+export interface Conventions {
+  /** branch name for "Start work": {user}, {key}, {slug} */
+  branchPattern: string
+  /** release branch name: {env}, {week}, {date}, {name}, {seq} */
+  releasePattern: string
+}
+export interface Organization {
+  id: string
+  name: string
+  color: string
+  groups: string[]
+  /** pipeline template inherited by the organization's repositories; null = each repository detects its own */
+  pipeline: EnvConfig | null
+  conventions: Conventions
+  tracker: TrackerConfig
+  howWeWork: string
+  createdAt: number
+}
+export interface OrganizationSummary { id: string; name: string; color: string; repoCount: number }
+export interface WorkspaceState { version: number; active: string; organizations: OrganizationSummary[] }
+/** repositories sharing a hosting owner, proposed as an organization */
+export interface OwnerProposal { host: string; owner: string; repos: RepoEntry[] }
+export interface OrgExport {
+  version: 1
+  organization: Omit<Organization, 'id' | 'createdAt'>
+  repositories: { remote: string; name: string; group: string | null }[]
+}
+export interface ImportResult { org: OrganizationSummary; matched: RepoEntry[]; missing: { remote: string; name: string; group: string | null }[] }
+/** how a repository relates to its organization's pipeline template */
+export interface RepoPipelineOverride {
+  mode: 'org' | 'custom'
+  branchMap?: Record<string, string>
+  disabled?: string[]
+  strategyMap?: Record<string, Environment['strategy']>
+  custom?: EnvConfig
+}
+export interface RepoPipeline { override: RepoPipelineOverride; template: EnvConfig | null; resolved: EnvConfig }
+export interface RepoOverviewCard {
+  repo: RepoEntry
+  error?: string
+  branch?: string | null
+  detached?: boolean
+  changed?: number
+  ahead?: number
+  behind?: number
+  state?: string
+  lastFetch?: number | null
+  environments?: { id: string; name: string; branch: string; ready: number; missing: boolean }[]
+  drift?: { from: string; to: string; commits: number } | null
+  devBased?: number
+  staleReleaseBranches?: string[]
+  unreleased?: number
+}
+export interface OrgOverview {
+  org: OrganizationSummary
+  repos: RepoOverviewCard[]
+  totals: { ready: { id: string; name: string; count: number }[]; unreleased: number; warnings: number }
+  generatedAt: number
+}
+export interface OrgTrackerStatus extends TrackerStatus { hasApiKey: boolean; signedIn: boolean }
+
+export interface OrganizationApi {
+  workspace(): Promise<WorkspaceState>
+  orgGet(id: string): Promise<Organization>
+  orgSetActive(id: string): Promise<WorkspaceState>
+  orgCreate(input: { name: string; color?: string; repoPaths?: string[]; moveTrackerFrom?: string | null }): Promise<Organization>
+  orgUpdate(id: string, patch: Partial<Omit<Organization, 'id' | 'createdAt'>>): Promise<Organization>
+  orgDelete(id: string): Promise<WorkspaceState>
+  orgMoveRepo(path: string, orgId: string): Promise<void>
+  orgProposals(): Promise<OwnerProposal[]>
+  /** writes the organization file through a save dialog; returns the path or null */
+  orgExport(id: string): Promise<string | null>
+  /** reads an organization file through an open dialog */
+  orgImport(): Promise<ImportResult | null>
+  orgOverview(id: string): Promise<OrgOverview>
+  orgTrackerStatus(id: string): Promise<OrgTrackerStatus>
+  orgTrackerSetSecrets(id: string, secrets: { linearApiKey?: string; linearClientSecret?: string }): Promise<void>
+  orgTrackerLogin(id: string): Promise<OAuthResult>
+  orgTrackerLogout(id: string): Promise<void>
+  repoPipeline(repo: string): Promise<RepoPipeline>
+  saveRepoPipeline(repo: string, override: RepoPipelineOverride): Promise<EnvConfig>
 }
 
 export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
 export interface WorktreeInfo { path: string; sha: string; branch: string | null; main: boolean }
 
-export interface PakGitApi extends ReleaseApi {
+export interface PakGitApi extends ReleaseApi, OrganizationApi {
   listGroups(): Promise<string[]>
   createGroup(name: string): Promise<string[]>
   renameGroup(oldName: string, newName: string): Promise<void>

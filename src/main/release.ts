@@ -2,7 +2,11 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import * as git from './git'
 import { tracker } from './tracker'
-import type { BranchTarget, Commit, EnvConfig, Environment, PrepareOptions, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
+import type { BranchTarget, Commit, EnvConfig, Environment, PrepareOptions, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem, RepoPipeline, RepoPipelineOverride } from '@shared/types'
+import { applyOverride } from './organizations'
+
+const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return d } }
+const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(v, null, 2)) }
 
 // ---------- pull requests on the hosting provider ----------
 
@@ -45,7 +49,22 @@ let configDir = ''
 /** Directory holding release-config.json (the Electron userData folder; a temp dir in tests). */
 export function setReleaseConfigDir(dir: string): void { configDir = dir }
 const cfgFile = () => join(configDir || process.cwd(), 'release-config.json')
-function loadAll(): Record<string, EnvConfig> { try { return JSON.parse(readFileSync(cfgFile(), 'utf8')) } catch { return {} } }
+/** Per-repository pipeline overrides (legacy entries are full configs and are read as custom pipelines). */
+function loadOverrides(): Record<string, RepoPipelineOverride> {
+  const raw = readJson<Record<string, unknown>>(cfgFile(), {})
+  const out: Record<string, RepoPipelineOverride> = {}
+  for (const [repo, v] of Object.entries(raw)) {
+    const o = v as Record<string, unknown>
+    if (o && typeof o['mode'] === 'string') out[repo] = o as unknown as RepoPipelineOverride
+    else { const legacy = migrate(o); if (legacy) out[repo] = { mode: 'custom', custom: legacy } }
+  }
+  return out
+}
+function saveOverrides(all: Record<string, RepoPipelineOverride>): void { writeJson(cfgFile(), all) }
+
+/** Where a repository's organization pipeline template comes from; set by the main process. */
+let templateProvider: (repo: string) => EnvConfig | null = () => null
+export function setTemplateProvider(fn: (repo: string) => EnvConfig | null): void { templateProvider = fn }
 
 const DEV = ['dev', 'develop', 'development'], STAGE = ['stage', 'staging', 'uat', 'qa'], PROD = ['main', 'master', 'prod', 'production']
 
@@ -79,12 +98,17 @@ function migrate(raw: Record<string, unknown>): EnvConfig | null {
 }
 
 export async function releaseConfig(repo: string): Promise<EnvConfig> {
-  const saved = loadAll()[repo]
-  const migrated = saved ? migrate(saved as unknown as Record<string, unknown>) : null
-  if (migrated && migrated.environments.length) return migrated
-  return detectConfig(repo)
+  return (await repoPipeline(repo)).resolved
 }
-export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
+/** The repository's override, its organization template and the resolved pipeline. */
+export async function repoPipeline(repo: string): Promise<RepoPipeline> {
+  const override = loadOverrides()[repo] ?? { mode: 'org' }
+  const template = templateProvider(repo)
+  if (override.mode === 'custom' && override.custom?.environments?.length) return { override, template, resolved: withDefaults(override.custom) }
+  if (template) return { override, template, resolved: withDefaults(applyOverride(withDefaults(template), override)) }
+  return { override, template: null, resolved: await detectConfig(repo) }
+}
+function validate(cfg: EnvConfig): EnvConfig {
   if (!cfg.environments.length) throw new Error('At least one environment is required')
   const ids = new Set<string>()
   for (const e of cfg.environments) {
@@ -96,9 +120,27 @@ export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
   cfg = withDefaults(cfg)
   cfg.issuePrefixes = cfg.issuePrefixes.map((p) => p.trim().toUpperCase()).filter(Boolean)
   cfg.excludePrefixes = cfg.excludePrefixes.map((p) => p.trim()).filter(Boolean)
-  const all = loadAll(); all[repo] = cfg
-  mkdirSync(dirname(cfgFile()), { recursive: true }); writeFileSync(cfgFile(), JSON.stringify(all, null, 2))
   return cfg
+}
+/** Validate a pipeline (organization templates use this too). */
+export function validatePipeline(cfg: EnvConfig): EnvConfig { return validate(structuredClone(cfg)) }
+/** Save a fully custom pipeline for the repository (the legacy entry point). */
+export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
+  const custom = validate(cfg)
+  const all = loadOverrides(); all[repo] = { mode: 'custom', custom }
+  saveOverrides(all)
+  return custom
+}
+export async function saveRepoPipeline(repo: string, override: RepoPipelineOverride): Promise<EnvConfig> {
+  if (override.mode === 'custom') return saveReleaseConfig(repo, override.custom ?? (await detectConfig(repo)))
+  const template = templateProvider(repo)
+  const clean: RepoPipelineOverride = { mode: 'org', branchMap: {}, disabled: override.disabled ?? [], strategyMap: {} }
+  for (const [k, v] of Object.entries(override.branchMap ?? {})) if (v && v.trim()) clean.branchMap![k] = v.trim()
+  for (const [k, v] of Object.entries(override.strategyMap ?? {})) if (v) clean.strategyMap![k] = v
+  if (template) applyOverride(withDefaults(template), clean) // throws when everything is disabled
+  const all = loadOverrides(); all[repo] = clean
+  saveOverrides(all)
+  return (await repoPipeline(repo)).resolved
 }
 const envById = (cfg: EnvConfig, id: string): Environment => { const e = cfg.environments.find((x) => x.id === id); if (!e) throw new Error(`Unknown environment "${id}"`); return e }
 const lastEnv = (cfg: EnvConfig): Environment => cfg.environments[cfg.environments.length - 1]
@@ -108,8 +150,6 @@ const baseBranch = (cfg: EnvConfig): string => envById(cfg, cfg.baseEnv).branch
 
 const archiveFile = () => join(configDir || process.cwd(), 'release-archive.json')
 const overridesFile = () => join(configDir || process.cwd(), 'release-overrides.json')
-const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return d } }
-const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(v, null, 2)) }
 export function setArchived(repo: string, ids: string[], archived: boolean): void {
   const all = readJson<Record<string, string[]>>(archiveFile(), {})
   const set = new Set(all[repo] ?? [])

@@ -1,7 +1,7 @@
 import { Injectable, computed, effect, signal } from '@angular/core'
-import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, RebaseTodoEntry, Refs, ReleaseAnalysis, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, TrackerStatus, WorktreeInfo } from '@shared/types'
+import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, TrackerStatus, WorkspaceState, WorktreeInfo } from '@shared/types'
 
-export type Perspective = 'standard' | 'log' | 'worktree' | 'release'
+export type Perspective = 'standard' | 'log' | 'worktree' | 'release' | 'organization'
 export type Theme = 'light' | 'dark'
 export interface Toast { id: number; kind: 'error' | 'info' | 'success'; text: string }
 export interface DialogField { key: string; label: string; value?: string; type?: 'text' | 'textarea' | 'checkbox' | 'select'; options?: string[]; placeholder?: string }
@@ -51,6 +51,14 @@ export class Store {
   readonly release = signal<ReleaseAnalysis | null>(null)
   readonly releaseLoading = signal(false)
   readonly trackerStatus = signal<TrackerStatus | null>(null)
+  // organizations
+  readonly workspace = signal<WorkspaceState | null>(null)
+  readonly org = signal<Organization | null>(null)
+  readonly activeOrgId = computed(() => this.workspace()?.active ?? 'personal')
+  readonly showOrgConfig = signal<string | null>(null)
+  readonly showNewOrg = signal(false)
+  readonly overview = signal<OrgOverview | null>(null)
+  readonly overviewLoading = signal(false)
 
   readonly effectiveLogLimit = computed(() => this.logLimit() || this.settings()?.logLimit || 400)
   readonly singleFile = computed(() => (this.selectedFiles().length === 1 ? this.selectedFiles()[0] : null))
@@ -82,6 +90,7 @@ export class Store {
     })
 
     this.api.getSettings().then((s) => this.settings.set(s)).catch(() => undefined)
+    void this.loadWorkspace()
     this.api.gitVersion().then((v) => this.gitVersion.set(v)).catch(() => this.gitVersion.set('git not found'))
     this.reloadRepos().then((list) => {
       const last = LS.get<string | null>('lastRepo', null)
@@ -143,18 +152,51 @@ export class Store {
   }
   async refreshTracker(): Promise<void> { try { this.trackerStatus.set(await this.api.trackerStatus()) } catch { this.trackerStatus.set(null) } }
 
+  // ---- organizations
+  async loadWorkspace(): Promise<void> {
+    try { const w = await this.api.workspace(); this.workspace.set(w); this.org.set(await this.api.orgGet(w.active)); void this.firstRunHint(w) } catch { /* pre-organization main process */ }
+  }
+  /** Once: when only Personal exists and several repositories share a hosting owner, suggest an organization. */
+  private async firstRunHint(w: WorkspaceState): Promise<void> {
+    if (w.organizations.length > 1 || LS.get('orgHintShown', false)) return
+    try {
+      const p = (await this.api.orgProposals()).find((x) => x.repos.length >= 2)
+      if (!p) return
+      LS.set('orgHintShown', true)
+      this.toast('info', `${p.repos.length} repositories share the owner "${p.owner}". Create an organization for them: Repositories ▸ Personal ▸ New organization…`)
+    } catch { /* ignore */ }
+  }
+  async switchOrg(id: string): Promise<void> {
+    if (id === this.activeOrgId()) return
+    this.workspace.set(await this.api.orgSetActive(id)); this.org.set(await this.api.orgGet(id))
+    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null)
+    const list = await this.reloadRepos()
+    const last = LS.get<Record<string, string>>('lastRepoByOrg', {})[id]
+    const entry = list.find((r) => r.path === last) ?? list[0] ?? null
+    if (entry) this.openRepo(entry); else { this.repo.set(null); await this.refresh() }
+    void this.refreshTracker()
+    if (this.perspective() === 'organization') void this.loadOverview()
+  }
+  async reloadOrg(): Promise<void> { const w = await this.api.workspace(); this.workspace.set(w); this.org.set(await this.api.orgGet(w.active)); await this.reloadRepos() }
+  async loadOverview(): Promise<void> {
+    const id = this.activeOrgId(); this.overviewLoading.set(true)
+    try { this.overview.set(await this.api.orgOverview(id)) } catch (e) { this.toast('error', `Overview: ${e instanceof Error ? e.message : String(e)}`) } finally { this.overviewLoading.set(false) }
+  }
+
   openRepo(entry: RepoEntry): void {
     this.release.set(null)
     this.selectedFiles.set([]); this.selectedCommit.set(null); this.selectedCommitFile.set(null); this.selectedStash.set(null); this.blame.set(null); this.diff.set('')
     this.logPath.set(null); this.logLimit.set(0)
     this.repo.set(entry)
     LS.set('lastRepo', entry.path)
+    LS.set('lastRepoByOrg', { ...LS.get<Record<string, string>>('lastRepoByOrg', {}), [this.activeOrgId()]: entry.path })
     void this.refresh()
   }
   /** Reload the repository list and groups from disk. */
   async reloadRepos(): Promise<RepoEntry[]> {
     const [list, groups] = await Promise.all([this.api.listRepos(), this.api.listGroups().catch(() => [])])
     this.repos.set(list); this.groups.set(groups)
+    this.api.workspace().then((w) => this.workspace.set(w)).catch(() => undefined)
     return list
   }
   async addRepo(path?: string, group?: string | null): Promise<void> {
