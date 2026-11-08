@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
-import type { Conventions, EnvConfig, Freeze, HostingConfig, ImportResult, OrgExport, Organization, OrganizationSummary, OwnerProposal, RepoEntry, RepoPipelineOverride, TrackerConfig, WorkspaceState } from '@shared/types'
+import type { Cadence, ConfigRepo, Conventions, EnvConfig, Freeze, HostingConfig, ImportResult, NextRelease, NotificationConfig, OrgExport, Organization, OrganizationSummary, OwnerProposal, RepoEntry, RepoPipelineOverride, SavedView, TrackerConfig, WorkspaceState } from '@shared/types'
 
 export const PERSONAL = 'personal'
 const VERSION = 1
@@ -21,7 +21,8 @@ const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFil
 const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(v, null, 2)) }
 
 export const defaultConventions = (): Conventions => ({ branchPattern: '{user}/{key}-{slug}', releasePattern: 'release/{env}-{week}' })
-export const defaultTracker = (): TrackerConfig => ({ provider: 'none', authMethod: 'oauth', linearClientId: '', stateOnStart: 'In Progress' })
+export const defaultTracker = (): TrackerConfig => ({ provider: 'none', authMethod: 'oauth', linearClientId: '', jiraSite: '', stateOnStart: 'In Progress' })
+export const defaultNotifications = (): NotificationConfig => ({ slack: { enabled: false, created: true, merged: true, finished: true, reverted: true } })
 export const defaultHosting = (): HostingConfig => ({ provider: 'auto', prTemplate: '', reviewers: [], labels: [], draft: false, attachPrsToIssues: false })
 /** The organization's folder (releases.json lives next to org.json). */
 export function orgDirectory(id: string): string { return orgDir(id) }
@@ -51,7 +52,7 @@ export function parseIdentity(identity: string | null | undefined): { host: stri
 // ---------- workspace ----------
 
 function emptyPersonal(): Organization {
-  return { id: PERSONAL, name: 'Personal', color: COLORS[0], groups: [], pipeline: null, conventions: defaultConventions(), tracker: defaultTracker(), hosting: defaultHosting(), freezes: {}, deployOrder: [], howWeWork: '', createdAt: Date.now() }
+  return { id: PERSONAL, name: 'Personal', color: COLORS[0], groups: [], pipeline: null, conventions: defaultConventions(), tracker: defaultTracker(), hosting: defaultHosting(), freezes: {}, deployOrder: [], configRepo: null, views: [], notifications: defaultNotifications(), calendar: {}, knownRepos: [], howWeWork: '', createdAt: Date.now() }
 }
 
 /** One-time migration from the flat layout (repositories.json + groups.json at the root) into the Personal organization. Idempotent. */
@@ -94,11 +95,15 @@ export function setActive(id: string): WorkspaceState {
 export function getOrg(id: string): Organization {
   const o = readJson<Organization | null>(orgFile(id), null)
   if (!o) { if (id === PERSONAL) { const p = emptyPersonal(); writeJson(orgFile(PERSONAL), p); return p } throw new Error(`Unknown organization "${id}"`) }
-  return { ...emptyPersonal(), ...o, conventions: { ...defaultConventions(), ...(o.conventions ?? {}) }, tracker: { ...defaultTracker(), ...(o.tracker ?? {}) }, hosting: { ...defaultHosting(), ...(o.hosting ?? {}) }, freezes: o.freezes ?? {}, deployOrder: o.deployOrder ?? [], groups: o.groups ?? [] }
+  return {
+    ...emptyPersonal(), ...o, conventions: { ...defaultConventions(), ...(o.conventions ?? {}) }, tracker: { ...defaultTracker(), ...(o.tracker ?? {}) }, hosting: { ...defaultHosting(), ...(o.hosting ?? {}) },
+    freezes: o.freezes ?? {}, deployOrder: o.deployOrder ?? [], groups: o.groups ?? [], configRepo: o.configRepo ?? null, views: o.views ?? [],
+    notifications: { slack: { ...defaultNotifications().slack, ...(o.notifications?.slack ?? {}) } }, calendar: o.calendar ?? {}, knownRepos: o.knownRepos ?? []
+  }
 }
 export function saveOrg(org: Organization): Organization { writeJson(orgFile(org.id), org); return org }
 
-export function createOrg(input: { name: string; color?: string; pipeline?: EnvConfig | null; conventions?: Partial<Conventions>; tracker?: Partial<TrackerConfig>; hosting?: Partial<HostingConfig>; deployOrder?: string[]; freezes?: Record<string, Freeze>; howWeWork?: string; groups?: string[] }): Organization {
+export function createOrg(input: { name: string; color?: string; pipeline?: EnvConfig | null; conventions?: Partial<Conventions>; tracker?: Partial<TrackerConfig>; hosting?: Partial<HostingConfig>; deployOrder?: string[]; freezes?: Record<string, Freeze>; configRepo?: ConfigRepo | null; views?: SavedView[]; notifications?: NotificationConfig; calendar?: Record<string, Cadence>; howWeWork?: string; groups?: string[] }): Organization {
   const name = input.name.trim()
   if (!name) throw new Error('Organization name is empty')
   let id = slugify(name); if (id === PERSONAL) id = 'personal-org'
@@ -109,6 +114,7 @@ export function createOrg(input: { name: string; color?: string; pipeline?: EnvC
     id, name, color: input.color ?? (COLORS.find((c) => !used.has(c)) ?? COLORS[1]), groups: input.groups ?? [],
     pipeline: input.pipeline ?? null, conventions: { ...defaultConventions(), ...(input.conventions ?? {}) },
     tracker: { ...defaultTracker(), ...(input.tracker ?? {}) }, hosting: { ...defaultHosting(), ...(input.hosting ?? {}) }, freezes: input.freezes ?? {}, deployOrder: input.deployOrder ?? [],
+    configRepo: input.configRepo ?? null, views: input.views ?? [], notifications: { slack: { ...defaultNotifications().slack, ...(input.notifications?.slack ?? {}) } }, calendar: input.calendar ?? {}, knownRepos: [],
     howWeWork: input.howWeWork ?? '', createdAt: Date.now()
   }
   saveOrg(org); writeJson(reposFile(id), [])
@@ -150,6 +156,32 @@ export function setFreeze(id: string, envId: string, freeze: Freeze | null): Org
 export function activeFreezes(org: Organization, now = Date.now()): Record<string, Freeze> {
   return Object.fromEntries(Object.entries(org.freezes).filter(([, f]) => freezeActive(f, now)))
 }
+// ---------- saved views and release calendar ----------
+
+export function saveView(id: string, view: SavedView): Organization {
+  const org = getOrg(id)
+  const views = org.views.filter((v) => v.id !== view.id && !(v.tab === view.tab && v.name.toLowerCase() === view.name.toLowerCase()))
+  return saveOrg({ ...org, views: [...views, view] })
+}
+export function deleteView(id: string, viewId: string): Organization { const org = getOrg(id); return saveOrg({ ...org, views: org.views.filter((v) => v.id !== viewId) }) }
+
+/** Next occurrence of each environment cadence (weekday 1 = Monday … 7 = Sunday, time HH:MM local). */
+export function nextReleases(org: Organization, now = new Date()): NextRelease[] {
+  const envs = org.pipeline?.environments ?? []
+  const out: NextRelease[] = []
+  for (const [envId, c] of Object.entries(org.calendar)) {
+    const weekday = Number(c.weekday); const [h, m] = (c.time || '10:00').split(':').map((x) => Number(x) || 0)
+    if (!(weekday >= 1 && weekday <= 7)) continue
+    const d = new Date(now); d.setHours(h, m, 0, 0)
+    const today = d.getDay() === 0 ? 7 : d.getDay()
+    let delta = (weekday - today + 7) % 7
+    if (delta === 0 && d.getTime() <= now.getTime()) delta = 7
+    d.setDate(d.getDate() + delta)
+    out.push({ envId, envName: envs.find((e) => e.id === envId)?.name || envId, at: d.getTime(), inHours: Math.round((d.getTime() - now.getTime()) / 36e5) })
+  }
+  return out.sort((a, b) => a.at - b.at)
+}
+
 /** Repository identity used in deploy order and release records: the remote, else the path. */
 export const repoIdentityKey = (r: Pick<RepoEntry, 'remote' | 'path'>): string => r.remote ?? r.path
 /** Repositories in deploy order: listed identities first (in order), then the rest by group and name. */
@@ -241,8 +273,14 @@ export function exportOrg(id: string): OrgExport {
   const o = getOrg(id)
   return {
     version: 1,
-    organization: { name: o.name, color: o.color, groups: o.groups, pipeline: o.pipeline, conventions: o.conventions, tracker: o.tracker, hosting: o.hosting, freezes: o.freezes, deployOrder: o.deployOrder, howWeWork: o.howWeWork },
-    repositories: orgRepos(id).filter((r) => r.remote).map((r) => ({ remote: r.remote!, name: r.name, group: r.group ?? null }))
+    organization: {
+      name: o.name, color: o.color, groups: o.groups, pipeline: o.pipeline, conventions: o.conventions, tracker: o.tracker, hosting: o.hosting, freezes: o.freezes, deployOrder: o.deployOrder,
+      configRepo: o.configRepo ? { ...o.configRepo, lastApplied: '' } : null, views: o.views, notifications: o.notifications, calendar: o.calendar, howWeWork: o.howWeWork
+    },
+    repositories: [
+      ...orgRepos(id).filter((r) => r.remote).map((r) => ({ remote: r.remote!, name: r.name, group: r.group ?? null })),
+      ...o.knownRepos.filter((k) => !orgRepos(id).some((r) => r.remote === k.remote))
+    ]
   }
 }
 
@@ -250,9 +288,19 @@ export function exportOrg(id: string): OrgExport {
 export function importOrg(data: OrgExport): ImportResult {
   if (!data || data.version !== 1 || !data.organization?.name) throw new Error('Not a PakGit organization file')
   const existing = listOrgs().find((o) => o.name.toLowerCase() === data.organization.name.toLowerCase() && o.id !== PERSONAL)
-  const org = existing
-    ? updateOrg(existing.id, { ...data.organization, tracker: { ...getOrg(existing.id).tracker, ...data.organization.tracker } })
-    : createOrg({ ...data.organization })
+  if (existing) return applyExportTo(existing.id, data)
+  const org = createOrg({ ...data.organization })
+  return attachRepos(org, data)
+}
+/** Apply an export to a given organization (the configuration-repository sync); local-only state (lastApplied, per-person secrets) is kept. */
+export function applyExportTo(orgId: string, data: OrgExport): ImportResult {
+  if (!data || data.version !== 1 || !data.organization?.name) throw new Error('Not a PakGit organization file')
+  const cur = getOrg(orgId)
+  const configRepo = data.organization.configRepo ? { ...data.organization.configRepo, lastApplied: cur.configRepo?.url === data.organization.configRepo.url ? cur.configRepo.lastApplied : '' } : cur.configRepo
+  const org = updateOrg(orgId, { ...data.organization, tracker: { ...cur.tracker, ...data.organization.tracker }, configRepo })
+  return attachRepos(org, data)
+}
+function attachRepos(org: Organization, data: OrgExport): ImportResult {
   const matched: RepoEntry[] = []
   const missing: ImportResult['missing'] = []
   for (const r of data.repositories) {
@@ -260,6 +308,8 @@ export function importOrg(data: OrgExport): ImportResult {
     if (found) { const moved = found.org === org.id ? found : moveRepo(found.path, org.id); if (r.group) { createGroup(org.id, r.group); setRepoGroup(found.path, r.group) } matched.push({ ...moved, group: r.group }) }
     else missing.push(r)
   }
+  // remember what is not here so exports and configuration pushes keep listing it
+  saveOrg({ ...getOrg(org.id), knownRepos: missing.map((m) => ({ remote: m.remote, name: m.name, group: m.group ?? null })) })
   return { org: { id: org.id, name: org.name, color: org.color, repoCount: orgRepos(org.id).length }, matched, missing }
 }
 

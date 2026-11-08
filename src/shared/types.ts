@@ -136,6 +136,8 @@ export interface TrackerConfig {
   provider: TrackerId
   authMethod: 'oauth' | 'apiKey'
   linearClientId: string
+  /** Jira Cloud site, e.g. https://acme.atlassian.net */
+  jiraSite: string
   stateOnStart: string
 }
 /** Per-person part of a connection (tracker or hosting), stored encrypted and never exported. */
@@ -147,6 +149,11 @@ export interface TrackerAuth {
   linearTokenExpiry: number
   /** GitHub personal access token used when the gh CLI is not signed in */
   githubToken: string
+  /** Jira Cloud: the e-mail of the account and its API token */
+  jiraEmail: string
+  jiraToken: string
+  /** Slack incoming webhook URL (a secret: per person, never exported) */
+  slackWebhook: string
 }
 export interface Conventions {
   /** branch name for "Start work": {user}, {key}, {slug} */
@@ -169,9 +176,52 @@ export interface Organization {
   freezes: Record<string, Freeze>
   /** repository identities (remote, else path) in deploy order; unlisted repositories follow by name */
   deployOrder: string[]
+  /** shared configuration repository (phase 4); null = export/import by file only */
+  configRepo: ConfigRepo | null
+  /** saved filter sets shown as chips on the Work and Ready tabs */
+  views: SavedView[]
+  notifications: NotificationConfig
+  /** environment id -> release cadence (shown as a countdown on the Overview) */
+  calendar: Record<string, Cadence>
+  /** repositories of the organization that are not cloned on this machine (from an import or the configuration repository); kept so exports and pushes do not lose them */
+  knownRepos: { remote: string; name: string; group: string | null }[]
   howWeWork: string
   createdAt: number
 }
+
+// ---------- sharing, views, notifications, calendar (phase 4) ----------
+
+export interface ConfigRepo {
+  url: string
+  /** branch to read and write; empty = the remote default */
+  branch: string
+  /** file inside the repository, e.g. pakgit/acme.pakgit-org.json */
+  file: string
+  /** commit of the file last applied here (so a change is reported once) */
+  lastApplied: string
+}
+export interface ConfigChange { path: string; kind: 'added' | 'removed' | 'changed'; from?: string; to?: string }
+export interface ConfigSyncState {
+  configured: boolean
+  /** commit of the remote file, null when it does not exist yet */
+  remote: string | null
+  changed: boolean
+  changes: ConfigChange[]
+  /** the local configuration differs from the remote file (push would change it) */
+  localChanges: ConfigChange[]
+  error?: string
+  fetchedAt: number
+}
+export interface SavedView { id: string; name: string; tab: 'work' | 'ready'; filters: Record<string, string | number | boolean> }
+export interface NotificationConfig { slack: { enabled: boolean; created: boolean; merged: boolean; finished: boolean; reverted: boolean } }
+export interface Cadence { /** 1 = Monday … 7 = Sunday */ weekday: number; /** HH:MM local time */ time: string }
+export interface NextRelease { envId: string; envName: string; at: number; inHours: number }
+
+// ---------- branch cleanup and reverts (phase 4) ----------
+
+export interface MergedBranch { repo: string; repoName: string; name: string; ref: string; sha: string; date: string; kind: 'work' | 'release' | 'sync' | 'other'; local: boolean }
+export interface CleanupResult { deleted: { repo: string; name: string }[]; failed: { repo: string; name: string; error: string }[] }
+export interface RevertResult { release: ReleaseRecord; repos: { repo: string; branch: string | null; pr: PullRequestStatus | null; prUrl: string | null; reverted: string[]; error: string | null }[] }
 
 // ---------- hosting (phase 3): pull-request state and creation ----------
 
@@ -240,6 +290,8 @@ export interface ReleaseRepo {
   /** the release branch is contained in the environment branch */
   onEnv: boolean
   error: string | null
+  /** a revert branch was created for this repository (phase 4) */
+  revert?: { branch: string; commits: string[]; pr: PullRequestStatus | null; prUrl: string | null; at: number } | null
 }
 export interface ReleaseRecord {
   id: string
@@ -253,7 +305,7 @@ export interface ReleaseRecord {
   repos: ReleaseRepo[]
   gates: GateResult[]
   overridden: GateId[]
-  status: 'in-progress' | 'finished' | 'dropped'
+  status: 'in-progress' | 'finished' | 'dropped' | 'reverted'
   finishedAt: number | null
   notes: string
   options: { push: boolean; openPr: boolean; draft: boolean }
@@ -266,7 +318,8 @@ export interface WorkspaceState { version: number; active: string; organizations
 export interface OwnerProposal { host: string; owner: string; repos: RepoEntry[] }
 export interface OrgExport {
   version: 1
-  organization: Omit<Organization, 'id' | 'createdAt'>
+  /** everything shareable; repositories not cloned locally are listed under repositories, not here */
+  organization: Omit<Organization, 'id' | 'createdAt' | 'knownRepos'>
   repositories: { remote: string; name: string; group: string | null }[]
 }
 export interface ImportResult { org: OrganizationSummary; matched: RepoEntry[]; missing: { remote: string; name: string; group: string | null }[] }
@@ -418,6 +471,20 @@ export interface OrganizationApi {
   orgProbe(id: string, repo?: string): Promise<Record<string, ProbeResult[]>>
   /** pull requests of a repository from the hosting provider (cached), newest first */
   hostingPullRequests(repo: string, fresh?: boolean): Promise<PullRequestStatus[]>
+  // phase 4: sharing, notifications, revert, cleanup, calendar
+  /** fetch the configuration repository and compare its file with this organization */
+  orgConfigSync(id: string, fresh?: boolean): Promise<ConfigSyncState>
+  /** apply the remote file to this organization */
+  orgConfigApply(id: string): Promise<ImportResult>
+  /** write this organization to the configuration repository and push */
+  orgConfigPush(id: string, message: string): Promise<ConfigSyncState>
+  orgSetSecret(id: string, secrets: { slackWebhook?: string; jiraEmail?: string; jiraToken?: string }): Promise<void>
+  orgSecretsStatus(id: string): Promise<{ slackWebhook: boolean; jiraToken: boolean; jiraEmail: string }>
+  orgTestSlack(id: string): Promise<void>
+  orgRevertRelease(id: string, releaseId: string, opts: { push: boolean; openPr: boolean }): Promise<RevertResult>
+  orgMergedBranches(id: string): Promise<MergedBranch[]>
+  orgDeleteBranches(id: string, branches: { repo: string; name: string }[]): Promise<CleanupResult>
+  orgNextReleases(id: string): Promise<NextRelease[]>
 }
 
 export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
@@ -512,7 +579,7 @@ export interface PakGitApi extends ReleaseApi, OrganizationApi {
 
 // ---------- issue trackers (Linear first; Jira / GitHub Issues can implement the same shape) ----------
 
-export type TrackerId = 'none' | 'linear'
+export type TrackerId = 'none' | 'linear' | 'jira'
 
 export interface TrackerIssue {
   key: string
@@ -561,6 +628,10 @@ export interface TrackerSettings {
   provider: TrackerId
   /** 'oauth' = sign in with the browser (recommended), 'apiKey' = personal API key */
   authMethod: 'oauth' | 'apiKey'
+  /** Jira Cloud site and this person's credentials */
+  jiraSite: string
+  jiraEmail: string
+  jiraToken: string
   linearApiKey: string
   /** OAuth application (created once in Linear ▸ Settings ▸ API ▸ OAuth applications) */
   linearClientId: string

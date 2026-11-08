@@ -303,3 +303,13 @@ button.chip:hover { border-color: var(--accent); } button.chip.active { backgrou
 .release-items { display: flex; flex-wrap: wrap; gap: 4px 2px; align-items: baseline; font-size: 12px; }
 .release-item-title { margin-right: 10px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
 .ref-pill.link { cursor: pointer; }
+
+/* phase 4: shared configuration, views, cleanup, calendar */
+.state-banner.config { background: color-mix(in srgb, var(--success) 14%, transparent); border: 1px solid var(--border); border-radius: var(--radius); }
+.chips.views { margin-left: auto; } button.chip.ghost { background: transparent; color: var(--fg-muted); border-style: dashed; }
+.diff-row { font-size: 12px; } .diff-path { color: var(--fg-muted); width: 300px; flex: none; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+.diff-vals { white-space: normal; } .diff-from { color: var(--del-fg); background: var(--del-bg); padding: 0 4px; border-radius: 3px; } .diff-to { color: var(--add-fg); background: var(--add-bg); padding: 0 4px; border-radius: 3px; }
+.diff-row.added .diff-path { color: var(--success); } .diff-row.removed .diff-path { color: var(--danger); }
+.cal-grid { display: grid; grid-template-columns: 180px 160px 120px 1fr; gap: 6px 10px; align-items: center; font-size: 12px; }
+.cal-grid select, .cal-grid input { padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg1); color: var(--fg1); min-width: 0; }
+.sync-status { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }

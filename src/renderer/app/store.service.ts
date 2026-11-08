@@ -1,5 +1,5 @@
 import { Injectable, computed, effect, signal } from '@angular/core'
-import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, HostingStatus, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, ReleaseRecord, ReleaseSelection, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, TrackerStatus, TrackerTeam, WorkIndex, WorkspaceState, WorktreeInfo } from '@shared/types'
+import type { BlameLine, Commit, CommitDetails, ConfigSyncState, FileEntry, GitLogLine, HostingStatus, NextRelease, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, ReleaseRecord, ReleaseSelection, RepoEntry, RepoStatus, SavedView, Settings, StashInfo, SubmoduleInfo, TrackerStatus, TrackerTeam, WorkIndex, WorkspaceState, WorktreeInfo } from '@shared/types'
 
 export type Perspective = 'standard' | 'log' | 'worktree' | 'release' | 'organization'
 export type OrgTab = 'overview' | 'work' | 'ready' | 'releases'
@@ -90,6 +90,16 @@ export class Store {
   /** release id to highlight in the Releases tab once */
   readonly releaseFocus = signal<string | null>(null)
   readonly inProgressReleases = computed(() => this.releases().filter((r) => r.status === 'in-progress').length)
+  // phase 4: shared configuration, calendar, cleanup, saved views
+  readonly configSync = signal<ConfigSyncState | null>(null)
+  readonly configSyncLoading = signal(false)
+  /** the diff dialog for the configuration repository is open */
+  readonly showConfigDiff = signal(false)
+  readonly configDismissed = signal<string | null>(null)
+  readonly nextReleases = signal<NextRelease[]>([])
+  readonly showCleanup = signal(false)
+  /** a saved view the Work or Ready tab should apply once */
+  readonly applyView = signal<SavedView | null>(null)
 
   readonly effectiveLogLimit = computed(() => this.logLimit() || this.settings()?.logLimit || 400)
   readonly singleFile = computed(() => (this.selectedFiles().length === 1 ? this.selectedFiles()[0] : null))
@@ -209,7 +219,7 @@ export class Store {
   async switchOrg(id: string): Promise<void> {
     if (id === this.activeOrgId()) return
     this.workspace.set(await this.api.orgSetActive(id)); this.org.set(await this.api.orgGet(id))
-    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null); this.index.set(null); this.trackerTeams.set([]); this.orgGroup.set(null); this.indexError.set(null); this.overviewError.set(null); this.readyTab.set(''); this.readyText.set(''); this.releases.set([]); this.hostingStatus.set(null)
+    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null); this.index.set(null); this.trackerTeams.set([]); this.orgGroup.set(null); this.indexError.set(null); this.overviewError.set(null); this.readyTab.set(''); this.readyText.set(''); this.releases.set([]); this.hostingStatus.set(null); this.configSync.set(null); this.nextReleases.set([]); this.configDismissed.set(null)
     const list = await this.reloadRepos()
     const last = LS.get<Record<string, string>>('lastRepoByOrg', {})[id]
     const entry = list.find((r) => r.path === last) ?? list[0] ?? null
@@ -245,6 +255,20 @@ export class Store {
   async refreshHosting(): Promise<void> { try { this.hostingStatus.set(await this.api.orgHostingStatus(this.activeOrgId())) } catch { this.hostingStatus.set(null) } }
   /** after a release changed: records, index and overview */
   async afterRelease(): Promise<void> { await Promise.all([this.loadReleases(), this.loadIndex(), this.loadOverview()]) }
+  async loadConfigSync(fresh = false): Promise<ConfigSyncState | null> {
+    const id = this.activeOrgId(); this.configSyncLoading.set(true)
+    try { const st = await this.api.orgConfigSync(id, fresh); if (this.activeOrgId() === id) this.configSync.set(st); return st }
+    catch (e) { this.toast('error', `Shared configuration: ${e instanceof Error ? e.message : String(e)}`); return null } finally { this.configSyncLoading.set(false) }
+  }
+  async loadNextReleases(): Promise<void> { try { this.nextReleases.set(await this.api.orgNextReleases(this.activeOrgId())) } catch { this.nextReleases.set([]) } }
+  async saveView(view: Omit<SavedView, 'id'> & { id?: string }): Promise<void> {
+    const org = this.org(); if (!org) return
+    const id = view.id ?? Math.random().toString(36).slice(2, 10)
+    const views = org.views.filter((v) => v.id !== id && !(v.tab === view.tab && v.name.toLowerCase() === view.name.toLowerCase()))
+    this.org.set(await this.api.orgUpdate(org.id, { views: [...views, { ...view, id }] }))
+    this.toast('success', `View "${view.name}" saved`)
+  }
+  async deleteView(viewId: string): Promise<void> { const org = this.org(); if (!org) return; this.org.set(await this.api.orgUpdate(org.id, { views: org.views.filter((v) => v.id !== viewId) })) }
   /** Open a repository of the active organization in the Release view, ticking and selecting items there. */
   openInRelease(path: string, check: string[], focus: string | null): void {
     const entry = this.repos().find((r) => r.path === path); if (!entry) return

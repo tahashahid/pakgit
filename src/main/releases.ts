@@ -12,13 +12,14 @@ import * as release from './release'
 import { buildIndex } from './workindex'
 import type { HostingProvider } from './hosting/provider'
 import type { TrackerProvider } from './tracker/provider'
-import type { CreateReleaseRequest, EnvConfig, Environment, FinishReleaseResult, GateCheck, GateConfig, GateId, GateMode, GateResult, Organization, PromoteInput, PromoteResult, ReleaseItemRef, ReleaseRecord, ReleaseRepo, ReleaseSelection, WorkIndex, WorkItem, WorkPart } from '@shared/types'
+import type { Notifier } from './notify'
+import type { CreateReleaseRequest, EnvConfig, Environment, FinishReleaseResult, GateCheck, GateConfig, GateId, GateMode, GateResult, Organization, PromoteInput, PromoteResult, ReleaseItemRef, ReleaseRecord, ReleaseRepo, ReleaseSelection, RevertResult, WorkIndex, WorkItem, WorkPart } from '@shared/types'
 
 const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return d } }
 const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(v, null, 2)) }
 const file = (orgId: string): string => join(orgs.orgDirectory(orgId), 'releases.json')
 
-export interface ReleaseDeps { tracker: TrackerProvider; hosting: HostingProvider }
+export interface ReleaseDeps { tracker: TrackerProvider; hosting: HostingProvider; notify?: Notifier }
 
 // ---------- records ----------
 
@@ -235,6 +236,7 @@ export async function createRelease(orgId: string, req: CreateReleaseRequest, de
     rec.repos.push(rr)
     put(orgId, rec)
   }
+  await deps.notify?.('created', rec)
   return rec
 }
 
@@ -286,13 +288,15 @@ export const landed = (rr: ReleaseRepo): boolean => rr.onEnv || rr.pr?.state ===
 export const readyToFinish = (rec: ReleaseRecord): boolean => rec.status === 'in-progress' && active(rec).length > 0 && active(rec).every((rr) => landed(rr) && !rr.paused)
 
 /** Re-read pull-request state and whether each release branch is contained in its environment branch. */
-export async function refreshRelease(orgId: string, releaseId: string, deps: Pick<ReleaseDeps, 'hosting'>): Promise<ReleaseRecord> {
+export async function refreshRelease(orgId: string, releaseId: string, deps: Pick<ReleaseDeps, 'hosting' | 'notify'>): Promise<ReleaseRecord> {
   const rec = getRelease(orgId, releaseId)
+  const nowMerged: ReleaseRepo[] = []
   for (const rr of active(rec)) {
     try {
       if (rr.pr || (await deps.hosting.supports(rr.path))) {
+        const before = rr.pr?.state
         const pr = await deps.hosting.pullRequest(rr.path, rr.pr?.number ?? rr.branch)
-        if (pr) { rr.pr = pr; rr.prUrl = pr.url }
+        if (pr) { rr.pr = pr; rr.prUrl = pr.url; if (pr.state === 'merged' && before !== 'merged') nowMerged.push(rr) }
       }
     } catch { /* hosting unavailable: keep the last known state */ }
     try {
@@ -303,7 +307,9 @@ export async function refreshRelease(orgId: string, releaseId: string, deps: Pic
       rr.onEnv = !!(envRef && branch && (await git.run(['merge-base', '--is-ancestor', branch, envRef], { cwd: rr.path, allowFail: true })).code === 0)
     } catch { /* unreadable repository: keep the last value */ }
   }
-  return put(orgId, rec)
+  put(orgId, rec)
+  for (const rr of nowMerged) await deps.notify?.('merged', rec, { repo: rr })
+  return rec
 }
 
 /** Once every repository landed: back-merge the environment into the earlier ones and move tracker states. */
@@ -328,7 +334,78 @@ export async function finishRelease(orgId: string, releaseId: string, opts: { pu
   }
   rec.status = 'finished'; rec.finishedAt = Date.now()
   put(orgId, rec)
+  await deps.notify?.('finished', rec, { notes: releaseNotes(orgId, releaseId) })
   return { release: rec, results }
+}
+
+// ---------- revert ----------
+
+/** Commits on the environment branch that brought the release in: the merge of the release branch, else a squash commit naming the PR or branch. */
+async function landingCommits(rr: ReleaseRepo, cfg: EnvConfig, envRef: string): Promise<string[]> {
+  const tip = await release.branchRef(rr.path, cfg.remote, rr.branch)
+  const log = await git.run(['log', '--first-parent', '-n', '300', '--format=%H%x00%P%x00%s', envRef], { cwd: rr.path, allowFail: true })
+  if (log.code !== 0) return []
+  for (const line of log.stdout.split('\n')) {
+    if (!line) continue
+    const [sha, parents, subject] = line.split('\0')
+    const ps = parents.split(' ').filter(Boolean)
+    if (ps.length > 1 && tip) {
+      const fromBranch = (await git.run(['merge-base', '--is-ancestor', ps[1], tip], { cwd: rr.path, allowFail: true })).code === 0
+      const hasTip = (await git.run(['merge-base', '--is-ancestor', tip, sha], { cwd: rr.path, allowFail: true })).code === 0
+      if (fromBranch && hasTip) return [sha]
+    }
+    if (ps.length === 1 && ((rr.pr && subject.includes(`(#${rr.pr.number})`)) || subject.includes(rr.branch))) return [sha]
+  }
+  return []
+}
+
+/** Revert the release in every repository where it landed: a revert branch from the environment with the landing commits reverted, pushed, and a pull request. */
+export async function revertRelease(orgId: string, releaseId: string, opts: { push: boolean; openPr: boolean }, deps: ReleaseDeps): Promise<RevertResult> {
+  const org = orgs.getOrg(orgId)
+  const rec = await refreshRelease(orgId, releaseId, deps)
+  if (rec.status === 'reverted') throw new Error(`${rec.name} is already reverted`)
+  const out: RevertResult = { release: rec, repos: [] }
+  for (const rr of active(rec)) {
+    const entry: RevertResult['repos'][number] = { repo: rr.path, branch: null, pr: null, prUrl: null, reverted: [], error: null }
+    try {
+      if (!landed(rr)) throw new Error(`not landed in ${rr.base}`)
+      const cfg = await release.releaseConfig(rr.path)
+      const env = cfg.environments.find((e) => e.id === rec.envId)
+      if (!env) throw new Error(`no environment "${rec.envId}"`)
+      const envRef = await release.resolveEnvRef(rr.path, cfg, env.branch)
+      if (!envRef) throw new Error(`branch ${env.branch} not found`)
+      const commits = await landingCommits(rr, cfg, envRef)
+      if (!commits.length) throw new Error(`no merge of ${rr.branch} found on ${env.branch} (fetch first?)`)
+      const branch = `revert/${rr.branch.replace(/^[^/]+\//, '')}-${env.branch}`
+      if (await release.branchExists(rr.path, cfg.remote, branch)) throw new Error(`branch ${branch} already exists`)
+      await release.checkoutEnvBranch(rr.path, cfg, env.branch)
+      await git.run(['checkout', '-q', '-b', branch], { cwd: rr.path })
+      for (const sha of commits) {
+        const isMerge = (await git.run(['rev-list', '--parents', '-n', '1', sha], { cwd: rr.path })).stdout.trim().split(' ').length > 2
+        const r = await git.run(['revert', '--no-edit', ...(isMerge ? ['-m', '1'] : []), sha], { cwd: rr.path, allowFail: true, env: { GIT_EDITOR: 'true' } })
+        if (r.code !== 0) throw new Error(`revert of ${sha.slice(0, 7)} conflicts; resolve it on ${branch} by hand`)
+      }
+      entry.branch = branch; entry.reverted = commits
+      if (opts.push) {
+        await git.run(['push', '-u', cfg.remote, branch], { cwd: rr.path })
+        if (opts.openPr) {
+          const title = `Revert ${rec.name} on ${env.branch}`
+          const body = `Reverts ${rec.name} (${commits.map((c) => c.slice(0, 7)).join(', ')}) on ${env.branch}.\n\nCreated by PakGit.`
+          try {
+            if (await deps.hosting.supports(rr.path)) { entry.pr = await deps.hosting.createPullRequest(rr.path, { head: branch, base: env.branch, title, body, reviewers: org.hosting.reviewers, labels: org.hosting.labels }); entry.prUrl = entry.pr.url }
+            else entry.prUrl = (await release.openPullRequest(rr.path, branch, env.branch, title, body)).url
+          } catch (e) { entry.error = `Pull request: ${e instanceof Error ? e.message : String(e)}` }
+        }
+      }
+      rr.revert = { branch, commits, pr: entry.pr, prUrl: entry.prUrl, at: Date.now() }
+    } catch (e) { entry.error = e instanceof Error ? e.message : String(e) }
+    out.repos.push(entry)
+  }
+  if (out.repos.length && out.repos.every((r) => r.branch && !r.error)) { rec.status = 'reverted'; rec.finishedAt = rec.finishedAt ?? Date.now() }
+  put(orgId, rec)
+  if (out.repos.some((r) => r.branch)) await deps.notify?.('reverted', rec)
+  out.release = rec
+  return out
 }
 
 // ---------- notes ----------

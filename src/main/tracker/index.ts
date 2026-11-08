@@ -1,5 +1,6 @@
 import type { TrackerSettings } from '@shared/types'
 import { LinearProvider } from './linear'
+import { JiraProvider } from './jira'
 import { NoTracker, type TrackerProvider } from './provider'
 
 /**
@@ -13,7 +14,7 @@ let activeOrg = 'personal'
 export function configureTrackerFor(orgId: string, s: TrackerSettings | undefined, onTokensChanged?: (patch: Partial<TrackerSettings>) => void): TrackerProvider {
   const id = s?.provider ?? 'none'
   let p = instances.get(orgId)
-  if (!p || p.id !== id) { p = id === 'linear' ? new LinearProvider() : none; instances.set(orgId, p) }
+  if (!p || p.id !== id) { p = id === 'linear' ? new LinearProvider() : id === 'jira' ? new JiraProvider() : none; instances.set(orgId, p) }
   if (onTokensChanged) p.onTokensChanged = onTokensChanged
   if (s && p.id !== 'none') p.configure(s)
   return p

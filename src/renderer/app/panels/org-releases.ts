@@ -31,6 +31,7 @@ import type { ProbeResult, PullRequestStatus, ReleaseRecord, ReleaseRepo } from 
                 <button class="btn small" [disabled]="busy()" (click)="drop(r)" title="Keep the branches, stop tracking this release">Drop…</button>
               }
               <button class="btn small" (click)="notes(r)" title="Release notes to copy">Notes</button>
+              @if (r.status !== 'reverted' && r.status !== 'dropped' && anyLanded(r)) { <button class="btn small danger" [disabled]="busy()" (click)="revert(r)" title="Create a revert branch and pull request in every repository where the release landed">Revert…</button> }
             </div>
             @if (r.overridden.length) { <div class="warn" style="font-size:12px">⚠ Created with overridden checks: {{ r.overridden.join(', ') }}</div> }
             <table class="release-repos">
@@ -64,6 +65,7 @@ import type { ProbeResult, PullRequestStatus, ReleaseRecord, ReleaseRepo } from 
                         @else if (!r.options.openPr) { <span class="muted">no pull request requested</span> }
                         @else { <span class="muted">no pull request yet</span> }
                         <span class="muted"> · {{ rr.onEnv ? 'on ' + rr.base + ' ✓' : 'not yet on ' + rr.base }}</span>
+                        @if (rr.revert) { <span class="status-pill canceled" [title]="rr.revert.commits.join(', ')">reverted on {{ rr.revert.branch }}</span>@if (rr.revert.pr) { <a href="#" (click)="$event.preventDefault(); open(rr.revert!.pr!.url)">PR #{{ rr.revert.pr.number }}</a> } @else if (rr.revert.prUrl) { <a href="#" (click)="$event.preventDefault(); open(rr.revert!.prUrl!)">pull-request page</a> } }
                       }
                     </td>
                     <td class="muted" style="width:170px;text-align:right">{{ rr.merged.length }} merged{{ rr.skipped.length ? ', ' + rr.skipped.length + ' already there' : '' }}</td>
@@ -111,7 +113,18 @@ export class OrgReleases {
     if (act.some((x) => x.error)) return 'needs attention'
     return landed === act.length ? 'ready to finish' : `${landed}/${act.length} landed`
   }
-  statusClass(r: ReleaseRecord): string { const t = this.statusText(r); return t === 'finished' || t === 'ready to finish' ? 'completed' : t === 'dropped' ? 'canceled' : t === 'paused' || t === 'needs attention' ? 'unknown' : 'started' }
+  statusClass(r: ReleaseRecord): string { const t = this.statusText(r); return t === 'finished' || t === 'ready to finish' ? 'completed' : t === 'dropped' || t === 'reverted' ? 'canceled' : t === 'paused' || t === 'needs attention' ? 'unknown' : 'started' }
+  anyLanded(r: ReleaseRecord): boolean { return r.repos.some((x) => !x.dropped && !x.revert && (x.onEnv || x.pr?.state === 'merged')) }
+  async revert(r: ReleaseRecord): Promise<void> {
+    const v = await this.store.prompt({ title: `Revert ${r.name}`, danger: true, okLabel: 'Revert', message: `For every repository where the release landed in ${r.envBranch}: creates revert/… from ${r.envBranch} with the landing commit reverted, pushes it and opens a pull request into ${r.envBranch}. Nothing is force-pushed; ${r.envBranch} changes only when the pull requests are merged.`, fields: [
+      { key: 'push', label: 'Push the revert branches', type: 'checkbox', value: 'true' }, { key: 'pr', label: 'Open the pull requests', type: 'checkbox', value: 'true' }] })
+    if (!v) return
+    await this.act('Revert', async () => {
+      const res = await this.store.api.orgRevertRelease(this.store.activeOrgId(), r.id, { push: !!v.push, openPr: !!v.push && !!v.pr })
+      for (const x of res.repos) { const name = r.repos.find((y) => y.path === x.repo)?.name ?? x.repo; this.store.toast(x.error ? 'error' : 'success', `${name}: ${x.error ?? (x.branch + (x.pr ? ' · PR #' + x.pr.number : x.prUrl ? ' · pull-request page opened' : ''))}`) }
+      await this.store.afterRelease()
+    })
+  }
   prClass(pr: PullRequestStatus): string { return pr.state === 'merged' ? 'completed' : pr.state === 'closed' ? 'canceled' : pr.checks === 'failure' || pr.reviewDecision === 'changes-requested' ? 'unknown' : 'started' }
   reviewText(pr: PullRequestStatus): string { return pr.reviewDecision === 'approved' ? 'approved' : pr.reviewDecision === 'changes-requested' ? 'changes requested' : pr.reviewDecision === 'review-required' ? 'pending' : 'none' }
   deployedFor(r: ReleaseRecord): string | null {

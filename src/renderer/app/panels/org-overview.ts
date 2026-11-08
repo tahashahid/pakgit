@@ -16,6 +16,7 @@ import type { RepoOverviewCard } from '@shared/types'
           <span>unreleased: <b>{{ ov.totals.unreleased }}</b></span>
           @if (ov.totals.partlyPromoted) { <a href="#" style="color:var(--warning)" (click)="$event.preventDefault(); showPartly()" title="Issues whose parts sit on different environments: open them in Ready">⚠ {{ ov.totals.partlyPromoted }} issue(s) partly promoted</a> }
           @if (ov.totals.warnings) { <span style="color:var(--warning)">⚠ {{ ov.totals.warnings }} warning(s)</span> }
+          @for (n of store.nextReleases(); track n.envId) { <span [title]="'Release cadence from Configure ▸ Conventions'">📅 next {{ n.envName }} release {{ when(n.at) }} ({{ countdown(n.inHours) }})</span> }
           <span class="muted">computed {{ iso(ov.generatedAt) | timeAgo }}</span>
         </div>
         @for (g of groups(ov.repos); track g.name) {
@@ -65,6 +66,8 @@ export class OrgOverview {
   shortRemote(r: string): string { return r.split('/').slice(1).join('/') }
   envBranch(c: RepoOverviewCard, envId: string): string { return c.environments?.find((e) => e.id === envId)?.branch ?? envId }
   iso(ms: number): string { return new Date(ms).toISOString() }
+  when(ms: number): string { const d = new Date(ms); return d.toLocaleDateString(undefined, { weekday: 'short' }) + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) }
+  countdown(h: number): string { return h < 1 ? 'now' : h < 48 ? `in ${h} h` : `in ${Math.round(h / 24)} d` }
   open(c: RepoOverviewCard): void { if (c.error) return; this.store.openRepo(c.repo); this.store.perspective.set('standard') }
   showPartly(): void { this.store.readyWarnOnly.set(true); this.store.orgTab.set('ready') }
   showReady(envId: string): void { this.store.readyWarnOnly.set(false); this.store.orgTab.set('ready'); this.store.readyTab.set(envId) }

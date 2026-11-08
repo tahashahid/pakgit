@@ -48,6 +48,11 @@ See [ANALYSIS.md](ANALYSIS.md) for the SmartGit feature analysis this design is 
   conflict with Resume, Finish (back-merge + Linear states) and release notes. Environments
   can be frozen; deployed-version probes (HTTP JSON, HTTP text, git tag) show what each
   environment runs
+- **Sharing and ecosystem** (phase 4): a configuration repository keeps the organization file
+  in git (check, review the diff, apply, push back); saved views as chips on Work and Ready;
+  Slack notifications on release events; Revert release (revert branch + pull request per
+  repository); Clean up merged branches; a release calendar with a countdown on the Overview;
+  Jira Cloud as a second issue tracker
 - **Planning across repositories**: a work-item index merges every repository's release
   analysis by issue key. *Work* tab: tracker issues × repositories with team, status, assignee,
   cycle and date filters, start work in several repositories at once, link a branch that follows
@@ -127,8 +132,8 @@ src/shared/    types shared between processes
 
 ## Roadmap
 
-- Organizations phase 4 (docs/ORGANIZATIONS.md): configuration-repository sync, Slack
-  notifications, Linear Releases sync, revert, branch cleanup, Jira / GitHub Issues
+- Organizations, later: Linear Releases sync, GitLab / Bitbucket pull-request state, GitHub
+  Issues as a tracker, a headless mode for CI (docs/ORGANIZATIONS.md)
 - Hosting providers (GitHub / GitLab / Bitbucket / Azure DevOps): pull requests, reviews
 - Three-way merge editor (today: take ours / theirs, or edit externally and mark resolved)
 - Split commit in interactive rebase; rebase across merge commits

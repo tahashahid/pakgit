@@ -1,7 +1,8 @@
 import { Component, computed, effect, inject, signal } from '@angular/core'
 import { Store } from '../store.service'
 import { PipelineEditor } from '../ui/pipeline-editor'
-import type { EnvConfig, Environment, GateConfig, GateId, GateMode, HostingConfig, HostingStatus, OrgTrackerStatus, Organization, RepoEntry, TrackerConfig } from '@shared/types'
+import type { Cadence, ConfigRepo, EnvConfig, Environment, GateConfig, GateId, GateMode, HostingConfig, HostingStatus, OrgTrackerStatus, Organization, RepoEntry, TrackerConfig } from '@shared/types'
+const WEEKDAYS = [[1, 'Monday'], [2, 'Tuesday'], [3, 'Wednesday'], [4, 'Thursday'], [5, 'Friday'], [6, 'Saturday'], [7, 'Sunday']] as const
 
 type Section = 'general' | 'repositories' | 'pipeline' | 'gates' | 'conventions' | 'integrations' | 'sharing'
 const GATES: { id: GateId; label: string; hint: string }[] = [
@@ -102,6 +103,17 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                   } @else { <p class="modal-message">Gates and freezes are part of the pipeline template. Set one under Pipeline; until then the defaults apply (the last environment blocks on tracker state "Ready To Deploy" and on partly promoted issues, everything else warns).</p> }
                 }
                 @case ('conventions') {
+                  <h3 style="margin:0;font-size:13px">Release calendar</h3>
+                  <small class="hint">Cadence per environment: the Overview shows the next release and a countdown. Environments come from the pipeline template or the repositories.</small>
+                  <div class="cal-grid">
+                    @for (e of calendarEnvs(); track e.id) {
+                      <span>{{ e.name || e.id }} <span class="mono muted">{{ e.branch }}</span></span>
+                      <select (change)="setCadence(e.id, { weekday: +$any($event.target).value })"><option value="0" [selected]="!o.calendar[e.id]">no cadence</option>@for (w of weekdays; track w[0]) { <option [value]="w[0]" [selected]="o.calendar[e.id]?.weekday === w[0]">every {{ w[1] }}</option> }</select>
+                      <input type="time" [value]="o.calendar[e.id]?.time ?? '10:00'" [disabled]="!o.calendar[e.id]" (change)="setCadence(e.id, { time: $any($event.target).value })" />
+                      <span></span>
+                    }
+                  </div>
+                  <h3 style="margin:6px 0 0;font-size:13px">Names</h3>
                   <div class="settings-grid">
                     <label class="field"><span>Branch name for "Start work"</span><input class="mono" [value]="o.conventions.branchPattern" (input)="setConv({ branchPattern: $any($event.target).value })" /><small class="hint">Tokens: {{ '{' }}user{{ '}' }}, {{ '{' }}key{{ '}' }}, {{ '{' }}slug{{ '}' }}. Linear's own branch name is used when it provides one.</small></label>
                     <label class="field"><span>Release branch name</span><input class="mono" [value]="o.conventions.releasePattern" (input)="setConv({ releasePattern: $any($event.target).value })" /><small class="hint">Tokens: {{ '{' }}env{{ '}' }}, {{ '{' }}week{{ '}' }}, {{ '{' }}date{{ '}' }}, {{ '{' }}name{{ '}' }}. Example: release/release-{{ '{' }}week{{ '}' }}</small></label>
@@ -111,7 +123,7 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                   <h3 style="margin:0;font-size:13px">Issue tracker</h3>
                   <div class="settings-grid">
                     <label class="field"><span>Provider</span>
-                      <select (change)="setTracker({ provider: $any($event.target).value })"><option value="none" [selected]="o.tracker.provider === 'none'">None</option><option value="linear" [selected]="o.tracker.provider === 'linear'">Linear</option></select>
+                      <select (change)="setTracker({ provider: $any($event.target).value })"><option value="none" [selected]="o.tracker.provider === 'none'">None</option><option value="linear" [selected]="o.tracker.provider === 'linear'">Linear</option><option value="jira" [selected]="o.tracker.provider === 'jira'">Jira Cloud</option></select>
                       <small class="hint">One tracker per organization; secrets and sign-ins are yours only and are never exported.</small></label>
                     @if (o.tracker.provider === 'linear') {
                       <label class="field"><span>Authentication</span>
@@ -130,6 +142,24 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                       }
                       <label class="field"><span>State when starting work on an issue</span><input [value]="o.tracker.stateOnStart" placeholder="In Progress" (input)="setTracker({ stateOnStart: $any($event.target).value })" /><small class="hint">States on arrival in each environment are part of the pipeline.</small></label>
                     }
+                    @if (o.tracker.provider === 'jira') {
+                      <label class="field"><span>Jira site</span><input [value]="o.tracker.jiraSite" placeholder="https://acme.atlassian.net" (input)="setTracker({ jiraSite: $any($event.target).value })" /><small class="hint">Shared with the organization. Issue keys (PROJ-123) are recognised in branch names and commits like Linear keys.</small></label>
+                      <label class="field"><span>Your Atlassian e-mail</span><input [value]="jiraEmail()" placeholder="you@company.com" (input)="jiraEmail.set($any($event.target).value)" /></label>
+                      <label class="field"><span>Your Jira API token</span><input type="password" [value]="jiraToken()" placeholder="leave empty to keep the stored token" (input)="jiraToken.set($any($event.target).value)" /><small class="hint">id.atlassian.com ▸ Security ▸ API tokens. {{ secrets()?.jiraToken ? 'A token is stored.' : 'No token stored yet.' }} Stored encrypted, yours only.</small></label>
+                      <div class="field"><span>Connection</span><div>@if (ts(); as t) { @if (t.configured && !t.error) { <span class="chip ok">Jira ✓ {{ t.account }}</span> } @else if (t.error) { <span class="chip bad" [title]="t.error">{{ t.error }}</span> } @else { <span class="muted">save the site, e-mail and token first</span> } }</div></div>
+                      <label class="field"><span>State when starting work on an issue</span><input [value]="o.tracker.stateOnStart" placeholder="In Progress" (input)="setTracker({ stateOnStart: $any($event.target).value })" /><small class="hint">A transition to this status must exist from the current one.</small></label>
+                    }
+                  </div>
+                  <h3 style="margin:6px 0 0;font-size:13px">Notifications (Slack)</h3>
+                  <div class="settings-grid">
+                    <label class="field field-check" style="padding-top:0"><input type="checkbox" [checked]="o.notifications.slack.enabled" (change)="setSlack({ enabled: $any($event.target).checked })" /><span>Post release events to Slack</span></label>
+                    <label class="field"><span>Incoming webhook URL</span><input type="password" [value]="slackWebhook()" placeholder="https://hooks.slack.com/services/… (leave empty to keep the stored one)" (input)="slackWebhook.set($any($event.target).value)" /><small class="hint">A secret: stored encrypted per person, never exported. {{ secrets()?.slackWebhook ? 'A webhook is stored.' : 'No webhook stored yet.' }} <a href="#" (click)="$event.preventDefault(); testSlack()">Send a test message</a></small></label>
+                    <div class="field" style="grid-column:1/-1"><span>Events</span><div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px">
+                      <label><input type="checkbox" [checked]="o.notifications.slack.created" (change)="setSlack({ created: $any($event.target).checked })" /> release created</label>
+                      <label><input type="checkbox" [checked]="o.notifications.slack.merged" (change)="setSlack({ merged: $any($event.target).checked })" /> pull request merged</label>
+                      <label><input type="checkbox" [checked]="o.notifications.slack.finished" (change)="setSlack({ finished: $any($event.target).checked })" /> release finished (with the notes)</label>
+                      <label><input type="checkbox" [checked]="o.notifications.slack.reverted" (change)="setSlack({ reverted: $any($event.target).checked })" /> release reverted</label>
+                    </div></div>
                   </div>
                   <h3 style="margin:6px 0 0;font-size:13px">Hosting (pull requests)</h3>
                   <div class="settings-grid">
@@ -153,7 +183,37 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                   <small class="hint">Slack notifications and CI beyond pull-request checks come in a later phase.</small>
                 }
                 @case ('sharing') {
-                  <p class="modal-message">Export writes one file with this organization's repositories (by remote URL), groups, pipeline, conventions and tracker configuration, and no secrets or local paths. A teammate imports it and gets the same setup, with Clone buttons for repositories they do not have.</p>
+                  <h3 style="margin:0;font-size:13px">Configuration repository</h3>
+                  <p class="modal-message">Point the organization at a small git repository the team shares. PakGit keeps the organization file there: it shows what changed since you last applied it, applies it, and pushes your edits back. No server, full history, reviewable in pull requests.</p>
+                  <div class="settings-grid">
+                    <label class="field"><span>Repository URL</span><input class="mono" [value]="o.configRepo?.url ?? ''" placeholder="git@github.com:acme/pakgit-config.git" (input)="setConfigRepo({ url: $any($event.target).value })" /><small class="hint">Cloned into the PakGit profile; uses your git credentials.</small></label>
+                    <label class="field"><span>Branch</span><input class="mono" [value]="o.configRepo?.branch ?? ''" placeholder="default branch" (input)="setConfigRepo({ branch: $any($event.target).value })" /></label>
+                    <label class="field"><span>File</span><input class="mono" [value]="o.configRepo?.file ?? ''" [placeholder]="defaultFile(o.name)" (input)="setConfigRepo({ file: $any($event.target).value })" /><small class="hint">Several organizations can share one repository with different files.</small></label>
+                    <div class="field"><span>Status</span>
+                      <div class="sync-status">
+                        @if (!o.configRepo?.url) { <span class="muted">not set</span> }
+                        @else if (store.configSyncLoading()) { <span class="spinner"></span> }
+                        @else if (store.configSync(); as cs) {
+                          @if (cs.error) { <span class="chip bad" [title]="cs.error">{{ cs.error.slice(0, 80) }}</span> }
+                          @else if (!cs.remote) { <span class="chip">file not in the repository yet</span> }
+                          @else if (cs.changed) { <span class="chip bad">{{ cs.changes.length }} change(s) to apply</span> }
+                          @else { <span class="chip ok">up to date</span> }
+                          @if (cs.localChanges.length && cs.remote) { <span class="chip">{{ cs.localChanges.length }} local change(s) to push</span> }
+                        } @else { <span class="muted">save, then check</span> }
+                      </div>
+                      <small class="hint">Save the settings first; the status refreshes on Check.</small></div>
+                  </div>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button type="button" class="btn small" [disabled]="!o.configRepo?.url || busy()" (click)="checkConfig()">Check</button>
+                    <button type="button" class="btn small" [disabled]="!store.configSync()?.remote" (click)="store.showConfigDiff.set(true)">Review and apply…</button>
+                    <button type="button" class="btn small" [disabled]="!o.configRepo?.url || busy()" (click)="pushConfig()">Push my configuration…</button>
+                  </div>
+                  @if (o.knownRepos.length) {
+                    <div class="group-header" style="padding-left:0">Repositories not on this machine<span class="count">{{ o.knownRepos.length }}</span></div>
+                    @for (m of o.knownRepos; track m.remote) { <div class="row"><span class="grow mono" style="font-size:11.5px">{{ m.remote }}</span>@if (m.group) { <span class="muted">{{ m.group }}</span> }<button type="button" class="btn small" (click)="clone(m)">Clone…</button></div> }
+                  }
+                  <h3 style="margin:10px 0 0;font-size:13px">Files</h3>
+                  <p class="modal-message">Export writes one file with this organization's repositories (by remote URL), groups, pipeline, conventions and integrations, and no secrets or local paths. A teammate imports it and gets the same setup, with Clone buttons for repositories they do not have.</p>
                   <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button type="button" class="btn" (click)="exportOrg()">Export organization…</button>
                     <button type="button" class="btn" (click)="importOrg()">Import organization…</button>
@@ -181,8 +241,14 @@ export class OrgConfigDialog {
     { id: 'conventions', label: 'Conventions' }, { id: 'integrations', label: 'Integrations' }, { id: 'sharing', label: 'Sharing' }
   ]
   readonly gateDefs = GATES
+  readonly weekdays = WEEKDAYS
   readonly hs = signal<HostingStatus | null>(null)
   readonly ghToken = signal('')
+  readonly jiraEmail = signal('')
+  readonly jiraToken = signal('')
+  readonly slackWebhook = signal('')
+  readonly secrets = signal<{ slackWebhook: boolean; jiraToken: boolean; jiraEmail: string } | null>(null)
+  readonly calendarEnvs = computed<{ id: string; name: string; branch: string }[]>(() => this.draft()?.pipeline?.environments.map((e) => ({ id: e.id, name: e.name, branch: e.branch })) ?? this.store.index()?.environments ?? [])
   readonly colors = COLORS
   readonly section = signal<Section>('general')
   readonly draft = signal<Organization | null>(null)
@@ -199,14 +265,37 @@ export class OrgConfigDialog {
       if (!s) { this.draft.set(null); return }
       const o = this.store.org(); if (!o) return
       this.draft.set(structuredClone(o)); this.section.set((s as Section) in { general: 1, repositories: 1, pipeline: 1, gates: 1, conventions: 1, integrations: 1, sharing: 1 } ? (s as Section) : 'general')
-      this.error.set(''); this.apiKey.set(''); this.ghToken.set('')
-      void this.refreshTracker(o.id); void this.refreshHosting()
+      this.error.set(''); this.apiKey.set(''); this.ghToken.set(''); this.jiraToken.set(''); this.slackWebhook.set('')
+      void this.refreshTracker(o.id); void this.refreshHosting(); void this.refreshSecrets(o.id)
     })
     this.store.api.trackerRedirectUrl().then((u) => this.redirect.set(u)).catch(() => undefined)
   }
   private async refreshTracker(id: string): Promise<void> { try { this.ts.set(await this.store.api.orgTrackerStatus(id)) } catch { this.ts.set(null) } }
   set(patch: Partial<Organization>): void { this.draft.update((d) => (d ? { ...d, ...patch } : d)) }
   setHosting(patch: Partial<HostingConfig>): void { this.draft.update((d) => (d ? { ...d, hosting: { ...d.hosting, ...patch } } : d)) }
+  setSlack(patch: Partial<Organization['notifications']['slack']>): void { this.draft.update((d) => (d ? { ...d, notifications: { ...d.notifications, slack: { ...d.notifications.slack, ...patch } } } : d)) }
+  setCadence(envId: string, patch: Partial<Cadence>): void {
+    this.draft.update((d) => { if (!d) return d; const cal = { ...d.calendar }; if (patch.weekday === 0) delete cal[envId]; else cal[envId] = { weekday: patch.weekday ?? cal[envId]?.weekday ?? 4, time: patch.time ?? cal[envId]?.time ?? '10:00' }; return { ...d, calendar: cal } })
+  }
+  setConfigRepo(patch: Partial<ConfigRepo>): void {
+    this.draft.update((d) => { if (!d) return d; const cur: ConfigRepo = d.configRepo ?? { url: '', branch: '', file: '', lastApplied: '' }; const next = { ...cur, ...patch }; return { ...d, configRepo: next.url.trim() ? next : null } })
+  }
+  defaultFile(name: string): string { return `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'org'}.pakgit-org.json` }
+  async refreshSecrets(id: string): Promise<void> { try { const s = await this.store.api.orgSecretsStatus(id); this.secrets.set(s); if (!this.jiraEmail()) this.jiraEmail.set(s.jiraEmail) } catch { this.secrets.set(null) } }
+  async checkConfig(): Promise<void> {
+    this.busy.set(true); this.error.set('')
+    try { await this.persist(); await this.store.reloadOrg(); await this.store.loadConfigSync(true) } catch (e) { this.error.set(e instanceof Error ? e.message : String(e)) } finally { this.busy.set(false) }
+  }
+  async pushConfig(): Promise<void> {
+    const v = await this.store.prompt({ title: 'Push configuration', okLabel: 'Push', message: 'Saves the settings, writes the organization file into the configuration repository and pushes it.', fields: [{ key: 'message', label: 'Commit message', value: `Update ${this.draft()?.name ?? 'organization'} configuration` }] })
+    if (!v) return
+    this.busy.set(true); this.error.set('')
+    try { await this.persist(); await this.store.reloadOrg(); this.store.configSync.set(await this.store.api.orgConfigPush(this.store.activeOrgId(), String(v.message ?? ''))); this.store.toast('success', 'Configuration pushed') }
+    catch (e) { this.error.set(e instanceof Error ? e.message : String(e)) } finally { this.busy.set(false) }
+  }
+  async testSlack(): Promise<void> {
+    try { await this.persist(); await this.store.api.orgTestSlack(this.store.activeOrgId()); this.store.toast('success', 'Test message sent to Slack') } catch (e) { this.error.set(e instanceof Error ? e.message : String(e)) }
+  }
   split(v: string): string[] { return v.split(',').map((x) => x.trim()).filter(Boolean) }
   async refreshHosting(): Promise<void> { try { this.hs.set(await this.store.api.orgHostingStatus(this.store.activeOrgId())) } catch { this.hs.set(null) } }
   // ---- gates & freeze (part of the pipeline template and the organization)
@@ -248,6 +337,10 @@ export class OrgConfigDialog {
     const saved = await this.store.api.orgUpdate(id, patch)
     if (this.apiKey().trim()) { await this.store.api.orgTrackerSetSecrets(id, { linearApiKey: this.apiKey().trim() }); this.apiKey.set('') }
     if (this.ghToken().trim()) { await this.store.api.orgHostingSetToken(id, this.ghToken().trim()); this.ghToken.set('') }
+    const secrets: { slackWebhook?: string; jiraEmail?: string; jiraToken?: string } = {}
+    if (this.slackWebhook().trim()) secrets.slackWebhook = this.slackWebhook().trim()
+    if (d.tracker.provider === 'jira') { secrets.jiraEmail = this.jiraEmail().trim(); if (this.jiraToken().trim()) secrets.jiraToken = this.jiraToken().trim() }
+    if (Object.keys(secrets).length) { await this.store.api.orgSetSecret(id, secrets); this.slackWebhook.set(''); this.jiraToken.set(''); void this.refreshSecrets(id) }
     this.store.org.set(saved)
     return saved
   }
@@ -270,7 +363,12 @@ export class OrgConfigDialog {
     const parent = await this.store.api.pickDirectory('Choose where to clone ' + m.name); if (!parent) return
     const url = `https://${m.remote}.git`
     const entry = await this.store.run('Clone', () => this.store.api.cloneRepo(url, `${parent}/${m.name}`), { success: `Cloned ${m.name}` })
-    if (entry) { if (m.group) await this.store.api.setRepoGroup(entry.path, m.group); this.missing.update((l) => l.filter((x) => x.remote !== m.remote)); await this.store.reloadRepos() }
+    if (entry) {
+      if (m.group) await this.store.api.setRepoGroup(entry.path, m.group)
+      this.missing.update((l) => l.filter((x) => x.remote !== m.remote))
+      const d = this.draft(); if (d) { const knownRepos = d.knownRepos.filter((x) => x.remote !== m.remote); await this.store.api.orgUpdate(d.id, { knownRepos }); this.draft.set({ ...d, knownRepos }) }
+      await this.store.reloadRepos()
+    }
   }
   togglePipeline(on: boolean): void {
     if (!on) { this.set({ pipeline: null }); return }

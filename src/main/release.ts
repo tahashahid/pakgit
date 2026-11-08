@@ -463,6 +463,8 @@ async function analyzeRepo(repo: string, opts: AnalyzeOptions): Promise<ReleaseA
 
 export async function enableRerere(repo: string): Promise<void> { await run(repo, ['config', 'rerere.enabled', 'true']) }
 
+/** Check out an environment branch (creating a tracking branch when needed) and fast-forward it to the remote. */
+export async function checkoutEnvBranch(repo: string, cfg: EnvConfig, name: string): Promise<void> { return checkoutEnv(repo, cfg, name) }
 async function checkoutEnv(repo: string, cfg: EnvConfig, name: string): Promise<void> {
   const st = await git.status(repo)
   if (st.files.some((f) => f.area !== 'untracked')) throw new Error('Working tree has uncommitted changes. Commit or stash them first.')

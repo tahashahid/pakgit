@@ -9,11 +9,15 @@ import * as orgs from './organizations'
 import { overview as orgOverview } from './overview'
 import * as workindex from './workindex'
 import * as releases from './releases'
+import * as configrepo from './configrepo'
+import * as cleanup from './cleanup'
+import { postSlack, slackNotifier } from './notify'
 import { probeRepo } from './probes'
 import { configureHostingFor, hostingFor } from './hosting'
 import { configureTrackerFor, setActiveTrackerOrg, tracker, trackerFor } from './tracker'
 import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
 import type { BranchTarget, CommitOptions, CreateReleaseRequest, DiffRequest, FileArea, Freeze, IssueQuery, OrgExport, Organization, PrepareOptions, ProbeResult, ReleaseSelection, RepoEntry, RepoPipelineOverride, StartWorkRequest, TrackerAuth, TrackerConfig, TrackerSettings } from '@shared/types'
+import type { ReleaseEvent } from './notify'
 
 // ---------- repository registry (per organization, see organizations.ts) ----------
 
@@ -37,9 +41,9 @@ async function fillRemotes(): Promise<void> {
 import type { Settings } from '@shared/types'
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
 const defaultSettings: Settings = { gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true, ghPath: '' }
-const emptyAuth = (): TrackerAuth => ({ linearApiKey: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0, githubToken: '' })
+const emptyAuth = (): TrackerAuth => ({ linearApiKey: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0, githubToken: '', jiraEmail: '', jiraToken: '', slackWebhook: '' })
 // Secrets are encrypted at rest with the OS keychain when available (Electron safeStorage).
-const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken', 'githubToken'] as const
+const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken', 'githubToken', 'jiraToken', 'slackWebhook'] as const
 const enc = (v: string): string => (v && safeStorage.isEncryptionAvailable() ? 'enc:' + safeStorage.encryptString(v).toString('base64') : v)
 const dec = (v: string): string => { try { return v?.startsWith('enc:') && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(v.slice(4), 'base64')) : v ?? '' } catch { return '' } }
 interface SettingsFile extends Settings { auth?: Record<string, TrackerAuth>; tracker?: Record<string, unknown> }
@@ -92,7 +96,15 @@ function configureOrgHosting(orgId: string): void {
   const org = orgs.getOrg(orgId)
   configureHostingFor(orgId, org.hosting, { token: loadAuth(orgId, 'github').githubToken, ghPath: loadSettings().ghPath })
 }
-const releaseDeps = (orgId: string) => ({ tracker: trackerFor(orgId), hosting: hostingFor(orgId) })
+/** Slack notifier for the organization when enabled and this person has a webhook. */
+function notifierFor(orgId: string) {
+  const org = orgs.getOrg(orgId)
+  const webhook = loadAuth(orgId, 'slack').slackWebhook
+  if (!org.notifications.slack.enabled || !webhook) return undefined
+  const ev = org.notifications.slack
+  return slackNotifier(webhook, org.name, { created: ev.created, merged: ev.merged, finished: ev.finished, reverted: ev.reverted } as Record<ReleaseEvent, boolean>)
+}
+const releaseDeps = (orgId: string) => ({ tracker: trackerFor(orgId), hosting: hostingFor(orgId), notify: notifierFor(orgId) })
 /** Legacy single tracker block in settings.json (pre-organizations) -> Personal organization config + auth. */
 function legacyTracker(): { config: TrackerConfig; auth: TrackerAuth } | null {
   const t = readSettingsFile().tracker as Record<string, string | number> | undefined
@@ -100,7 +112,7 @@ function legacyTracker(): { config: TrackerConfig; auth: TrackerAuth } | null {
   const a = emptyAuth()
   for (const f of SECRET_FIELDS) a[f] = dec(String(t[f] ?? ''))
   a.linearTokenExpiry = Number(t['linearTokenExpiry'] ?? 0)
-  return { config: { provider: (t['provider'] as TrackerConfig['provider']) ?? 'none', authMethod: (t['authMethod'] as TrackerConfig['authMethod']) ?? 'oauth', linearClientId: String(t['linearClientId'] ?? ''), stateOnStart: String(t['stateOnStart'] ?? 'In Progress') }, auth: a }
+  return { config: { provider: (t['provider'] as TrackerConfig['provider']) ?? 'none', authMethod: (t['authMethod'] as TrackerConfig['authMethod']) ?? 'oauth', linearClientId: String(t['linearClientId'] ?? ''), jiraSite: '', stateOnStart: String(t['stateOnStart'] ?? 'In Progress') }, auth: a }
 }
 
 // ---------- file watching ----------
@@ -287,7 +299,7 @@ function registerIpc(): void {
     const o = orgs.createOrg({ name: input.name, color: input.color, tracker: from ? from.tracker : undefined })
     if (from) {
       saveAuth(o.id, from.tracker.provider, loadAuth(from.id, from.tracker.provider))
-      orgs.updateOrg(from.id, { tracker: { provider: 'none', authMethod: 'oauth', linearClientId: '', stateOnStart: from.tracker.stateOnStart } })
+      orgs.updateOrg(from.id, { tracker: { provider: 'none', authMethod: 'oauth', linearClientId: '', jiraSite: '', stateOnStart: from.tracker.stateOnStart } })
       saveAuth(from.id, from.tracker.provider, emptyAuth())
       configureOrgTracker(from.id)
     }
@@ -346,6 +358,23 @@ function registerIpc(): void {
     return out
   })
   handle('hosting:pullRequests', (repo: string, fresh?: boolean) => hostingFor(orgs.orgOfRepo(repo)).listPullRequests(repo, !!fresh))
+  // ---- phase 4: sharing, secrets, notifications, revert, cleanup, calendar
+  handle('org:configSync', (id: string, fresh?: boolean) => configrepo.sync(id, !!fresh))
+  handle('org:configApply', async (id: string) => { const r = await configrepo.apply(id); configureOrgTracker(id); configureOrgHosting(id); return r })
+  handle('org:configPush', (id: string, message: string) => configrepo.push(id, message ?? ''))
+  handle('org:setSecret', (id: string, secrets: { slackWebhook?: string; jiraEmail?: string; jiraToken?: string }) => {
+    if (secrets.slackWebhook !== undefined) saveAuth(id, 'slack', { slackWebhook: secrets.slackWebhook.trim() })
+    const jira: Partial<TrackerAuth> = {}
+    if (secrets.jiraEmail !== undefined) jira.jiraEmail = secrets.jiraEmail.trim()
+    if (secrets.jiraToken !== undefined && secrets.jiraToken.trim()) jira.jiraToken = secrets.jiraToken.trim()
+    if (Object.keys(jira).length) { saveAuth(id, 'jira', jira); configureOrgTracker(id) }
+  })
+  handle('org:secretsStatus', (id: string) => ({ slackWebhook: !!loadAuth(id, 'slack').slackWebhook, jiraToken: !!loadAuth(id, 'jira').jiraToken, jiraEmail: loadAuth(id, 'jira').jiraEmail }))
+  handle('org:testSlack', async (id: string) => { const w = loadAuth(id, 'slack').slackWebhook; if (!w) throw new Error('No Slack webhook stored for this organization'); await postSlack(w, `PakGit: test message from ${orgs.getOrg(id).name}`) })
+  handle('org:revertRelease', (id: string, releaseId: string, opts: { push: boolean; openPr: boolean }) => releases.revertRelease(id, releaseId, opts, releaseDeps(id)))
+  handle('org:mergedBranches', (id: string) => cleanup.mergedBranches(id))
+  handle('org:deleteBranches', (id: string, list: { repo: string; name: string }[]) => cleanup.deleteBranches(id, list))
+  handle('org:nextReleases', (id: string) => orgs.nextReleases(orgs.getOrg(id)))
   handle('org:trackerStatus', async (id: string) => {
     const cfg = orgs.getOrg(id).tracker; const auth = loadAuth(id, cfg.provider)
     const st = await trackerFor(id).status()
@@ -514,6 +543,7 @@ app.whenReady().then(() => {
   setActiveTrackerOrg(orgs.activeOrgId())
   void fillRemotes()
   release.setReleaseConfigDir(app.getPath('userData'))
+  configrepo.setConfigRepoDir(app.getPath('userData'))
   release.setTemplateProvider((repo) => { try { return orgs.getOrg(orgs.orgOfRepo(repo)).pipeline } catch { return null } })
   release.setIdentityProvider((repo) => orgs.findRepo(repo)?.remote ?? undefined)
   release.setPrOpener((url) => shell.openExternal(url))

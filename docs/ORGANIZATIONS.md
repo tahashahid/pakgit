@@ -1,7 +1,31 @@
 # Organizations — design proposal (revision 2)
 
-Status: phases 1, 2 and 3 implemented (see section 12); phase 4 is a proposal. Revision 2
-after a critical second pass; the changes from revision 1 are listed at the end (section 14).
+Status: phases 1 to 4 implemented (see section 12). Revision 2 after a critical second pass;
+the changes from revision 1 are listed at the end (section 14).
+
+Phase 4 notes (what shipped, and what was left out):
+- Configuration repository: `Organization.configRepo` (url, branch, file, lastApplied). The
+  clone lives in `<userData>/config-repos/<org>/`. *Check* fetches and diffs the file against
+  the local organization (flattened paths such as `pipeline.environments[stage].trackerState`),
+  the Organization header shows a banner when the file changed since the last apply, *Review
+  and apply* applies it (repositories not cloned here are kept as `knownRepos` with Clone
+  buttons, so a later push does not drop them), *Push my configuration* writes and pushes.
+- Saved views: `Organization.views` (tab + filters) shown as chips on Work and Ready, shared
+  through the configuration repository like everything else on the organization.
+- Slack: incoming webhook per person (a secret), events on the organization (created, pull
+  request merged, finished with the notes, reverted). Notifications never block a release.
+- Revert: a `revert/<name>-<env>` branch from the environment with the landing commit reverted
+  (the merge commit, or the squash commit naming the pull request), pushed, pull request
+  opened; the release becomes *reverted* when every repository reverted cleanly.
+- Clean up merged branches: remote branches contained in the last environment per repository,
+  grouped and filtered by kind, deleted on the remote and locally when not checked out.
+- Release calendar: `Organization.calendar` (weekday + time per environment); the Overview
+  shows the next release and a countdown.
+- Jira Cloud provider (REST v3, e-mail + API token per person): same interface as Linear,
+  projects as teams, transitions as states, remote links for pull requests.
+- Not built: Linear Releases sync (the API surface is still moving), GitLab / Bitbucket
+  pull-request state (links keep working), GitHub Issues as a tracker (its numeric keys do not
+  fit the key-in-branch-name convention without a prefix).
 
 Phase 3 notes (what shipped, and where it differs from the proposal):
 - Releases are created from the Ready tab (*Promote selected…*). The dialog runs the gates
@@ -477,7 +501,7 @@ worth the most test coverage because mistakes there are silent.
 - Done when: this week's release is one object with a visible state from "created" to
   "finished".
 
-### Phase 4 — Sharing and ecosystem
+### Phase 4 — Sharing and ecosystem (implemented, see the notes at the top)
 - Configuration repository sync with diff; saved views.
 - Slack notifications; release notes generation; Linear Releases sync; Revert release;
   Clean up merged branches; release calendar (cadence per environment, default names and a

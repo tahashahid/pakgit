@@ -2,14 +2,15 @@ import { Component, computed, effect, inject, signal } from '@angular/core'
 import { LS, Store } from '../store.service'
 import { TimeAgoPipe } from '../ui/time-ago'
 import { ContextMenuService } from '../ui/context-menu'
-import type { PullRequestStatus, WorkItem, WorkPart } from '@shared/types'
+import { ViewsBar } from '../ui/views-bar'
+import type { PullRequestStatus, SavedView, WorkItem, WorkPart } from '@shared/types'
 
 interface Row { id: string; part: WorkPart; item: WorkItem }
 
 /** Ready tab: the Release table in organization scope, one row per issue and repository. */
 @Component({
   selector: 'pg-org-ready',
-  imports: [TimeAgoPipe],
+  imports: [TimeAgoPipe, ViewsBar],
   template: `
     <div class="org-pane">
       @if (store.index(); as idx) {
@@ -35,6 +36,7 @@ interface Row { id: string; part: WorkPart; item: WorkItem }
           <label title="Hide branches that were cut from dev/stage"><input type="checkbox" [checked]="hideDevBased()" (change)="hideDevBased.set($any($event.target).checked)" />Hide dev-based</label>
           <label title="Only issues whose parts sit on different environments"><input type="checkbox" [checked]="store.readyWarnOnly()" (change)="store.readyWarnOnly.set($any($event.target).checked)" />Partly promoted</label>
           @if (filterActive()) { <button class="btn small ghost" (click)="clearFilters()">Clear</button> }
+          <pg-views-bar tab="ready" [active]="activeView()" (apply)="applyView($event)" (save)="saveView()" />
         </div>
         <div class="log release-table">
           <table>
@@ -108,6 +110,7 @@ export class OrgReady {
   constructor() {
     // default tab: the second environment, like the per-repository view
     effect(() => { const idx = this.store.index(); if (idx && this.store.readyTab() === '' ) this.store.readyTab.set(idx.environments[1]?.id ?? 'unreleased') })
+    effect(() => { const v = this.store.applyView(); if (v && v.tab === 'ready') { this.applyView(v); this.store.applyView.set(null) } })
     // pull requests by branch once the hosting provider is available
     effect(() => { const idx = this.store.index(); const hs = this.store.hostingStatus(); if (idx && hs?.available) void this.loadPrs(idx.repos.map((r) => r.path)) })
   }
@@ -122,7 +125,20 @@ export class OrgReady {
     return list.find((pr) => pr.head === b && pr.state !== 'closed') ?? list.find((pr) => pr.head === b) ?? null
   }
   open(url: string): void { window.open(url) }
-  clearFilters(): void { this.store.readyText.set(''); this.repoFilter.set(''); this.statusFilter.set(''); this.hideDevBased.set(false); this.store.readyWarnOnly.set(false) }
+  clearFilters(): void { this.store.readyText.set(''); this.repoFilter.set(''); this.statusFilter.set(''); this.hideDevBased.set(false); this.store.readyWarnOnly.set(false); this.activeView.set(null) }
+  readonly activeView = signal<string | null>(null)
+  applyView(v: SavedView): void {
+    const f = v.filters
+    if (f['tab']) this.store.readyTab.set(String(f['tab']))
+    this.store.readyText.set(String(f['text'] ?? '')); this.repoFilter.set(String(f['repo'] ?? '')); this.statusFilter.set(String(f['status'] ?? '')); this.hideDevBased.set(!!f['hideDevBased']); this.store.readyWarnOnly.set(!!f['warnOnly'])
+    if (f['group'] !== undefined) this.store.orgGroup.set(String(f['group']) || null)
+    this.activeView.set(v.id)
+  }
+  async saveView(): Promise<void> {
+    const v = await this.store.prompt({ title: 'Save view', okLabel: 'Save', message: 'The current tab, filters and group chip of Ready become a chip for everyone who shares this organization.', fields: [{ key: 'name', label: 'Name', placeholder: 'e.g. Ready for stage, Portals' }] })
+    if (!v || !String(v.name).trim()) return
+    await this.store.saveView({ name: String(v.name).trim(), tab: 'ready', filters: { tab: this.store.readyTab(), text: this.store.readyText(), repo: this.repoFilter(), status: this.statusFilter(), hideDevBased: this.hideDevBased(), warnOnly: this.store.readyWarnOnly(), group: this.store.orgGroup() ?? '' } })
+  }
   /** ready for environment id: in the previous environment of that repository (or anywhere, for its first) and not in it or any later one */
   private readyFor(p: WorkPart, envId: string): boolean {
     const i = p.envIds.indexOf(envId); if (i < 0) return false

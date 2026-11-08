@@ -6,12 +6,14 @@ import { OrgWork } from './org-work'
 import { OrgReady } from './org-ready'
 import { OrgReleases } from './org-releases'
 import { ReleaseDialog } from './release-dialog'
+import { ConfigDiffDialog } from './config-diff-dialog'
+import { CleanupDialog } from './cleanup-dialog'
 import type { Freeze, ReleaseRecord } from '@shared/types'
 
 /** Organization perspective: header with the tabs (Overview · Work · Ready) and the group chips. */
 @Component({
   selector: 'pg-organization',
-  imports: [Icon, OrgOverview, OrgWork, OrgReady, OrgReleases, ReleaseDialog],
+  imports: [Icon, OrgOverview, OrgWork, OrgReady, OrgReleases, ReleaseDialog, ConfigDiffDialog, CleanupDialog],
   template: `
     <div class="org-view">
       <div class="org-header">
@@ -43,8 +45,14 @@ import type { Freeze, ReleaseRecord } from '@shared/types'
         <button class="btn small" (click)="fetchAll()" [disabled]="store.busy() !== null" title="Fetch every repository, then re-analyse"><pg-icon name="fetch" [size]="14" />Fetch all</button>
         <button class="btn small" (click)="refresh()" [disabled]="store.indexLoading()" title="Re-analyse every repository (bypasses the cache) and reload tracker data"><pg-icon name="refresh" [size]="14" /></button>
         <button class="btn small" (click)="store.showQuickOpen.set(true)" title="Quick open (Cmd/Ctrl+K)"><pg-icon name="search" [size]="14" /></button>
+        <button class="btn small" (click)="store.showCleanup.set(true)" title="Delete remote branches already merged into the last environment">Clean up…</button>
         <button class="btn small" (click)="store.showOrgConfig.set('general')" title="Organization settings; New organization… is in the organization switcher"><pg-icon name="gear" [size]="14" />Configure…</button>
       </div>
+      @if (store.configSync(); as cs) {
+        @if (cs.changed && store.configDismissed() !== cs.remote) {
+          <div class="state-banner config"><span>⇅ The shared configuration changed: {{ cs.changes.length }} setting(s) differ from this organization.</span><span style="flex:1"></span><button class="btn small primary" (click)="store.showConfigDiff.set(true)">Review…</button><button class="btn small ghost" (click)="store.configDismissed.set(cs.remote)">Later</button></div>
+        }
+      }
       @for (f of freezes(); track f.envId) {
         <div class="state-banner freeze"><span>❄ {{ f.envName }} is frozen{{ f.note ? ': ' + f.note : '' }}{{ f.until ? ' (until ' + f.until + ')' : '' }}. Promotions into it are blocked by the freeze gate.</span><span style="flex:1"></span><button class="btn small" (click)="lift(f.envId)">Lift</button></div>
       }
@@ -55,6 +63,8 @@ import type { Freeze, ReleaseRecord } from '@shared/types'
         @default { <pg-org-overview /> }
       }
       @if (store.releaseDraft(); as sel) { <pg-release-dialog [selection]="sel" [initialEnv]="store.readyTab()" (closed)="store.releaseDraft.set(null)" (created)="created($event)" /> }
+      <pg-config-diff-dialog />
+      <pg-cleanup-dialog />
     </div>`
 })
 export class OrganizationView {
@@ -73,6 +83,8 @@ export class OrganizationView {
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.overview() && !s.overviewLoading() && !s.overviewError()) void s.loadOverview() })
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.hostingStatus()) void s.refreshHosting() })
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.releases().length && !s.releasesLoading()) void s.loadReleases() })
+    effect(() => { if (s.perspective() === 'organization' && s.org() && !s.configSync() && !s.configSyncLoading()) void s.loadConfigSync() })
+    effect(() => { const o = s.org(); if (o && s.perspective() === 'organization') void s.loadNextReleases() })
     void s.refreshTracker()
   }
   async lift(envId: string): Promise<void> {

@@ -4,6 +4,8 @@ import { Icon } from '../ui/icon'
 import { TimeAgoPipe } from '../ui/time-ago'
 import { ContextMenuService } from '../ui/context-menu'
 import { StartWorkDialog, type StartWorkIssue } from './start-work-dialog'
+import { ViewsBar } from '../ui/views-bar'
+import type { SavedView } from '@shared/types'
 import type { IndexRepo, IssueQuery, TrackerIssue, WorkItem, WorkPart } from '@shared/types'
 
 interface Row { key: string; issue: TrackerIssue | undefined; item: WorkItem | null; team: string; updated: string }
@@ -13,7 +15,7 @@ interface Filters { team: string; state: string; assignee: 'anyone' | 'me' | 'un
 /** Work tab: tracker issues × repositories. A cell is the issue's part in that repository. */
 @Component({
   selector: 'pg-org-work',
-  imports: [Icon, TimeAgoPipe, StartWorkDialog],
+  imports: [Icon, TimeAgoPipe, StartWorkDialog, ViewsBar],
   template: `
     <div class="org-pane">
       <div class="filter-bar">
@@ -38,6 +40,7 @@ interface Filters { team: string; state: string; assignee: 'anyone' | 'me' | 'un
         <label title="Only issues in the active cycle (Linear)"><input type="checkbox" [checked]="f().cycle" (change)="setFilter({ cycle: $any($event.target).checked })" />Active cycle</label>
         <label title="Only issues whose parts sit on different environments"><input type="checkbox" [checked]="warnOnly()" (change)="warnOnly.set($any($event.target).checked)" />Partly promoted</label>
         <button class="btn small" (click)="load()" [disabled]="loading()" title="Reload issues from the tracker"><pg-icon name="refresh" [size]="14" /></button>
+        <pg-views-bar tab="work" [active]="activeView()" (apply)="applyView($event)" (save)="saveView()" />
       </div>
       @if (!trackerOk()) { <div class="state-banner">Linear is not connected for this organization, so rows come from git only. <a href="#" (click)="$event.preventDefault(); store.showOrgConfig.set('integrations')">Connect it under Configure ▸ Integrations</a> to see planned work too.</div> }
       @if (loadError()) { <div class="state-banner">{{ loadError() }}</div> }
@@ -147,9 +150,22 @@ export class OrgWork {
     }).sort((a, b) => (a.updated < b.updated ? 1 : -1))
   })
   readonly selectedRow = computed(() => this.rows().find((r) => r.key === this.selected()) ?? null)
+  readonly activeView = signal<string | null>(null)
+  applyView(v: SavedView): void {
+    const f = v.filters
+    this.f.set({ team: String(f['team'] ?? ''), state: String(f['state'] ?? ''), assignee: (f['assignee'] as Filters['assignee']) ?? 'anyone', days: Number(f['days'] ?? 0), cycle: !!f['cycle'] })
+    this.text.set(String(f['text'] ?? '')); this.warnOnly.set(!!f['warnOnly']); this.activeView.set(v.id)
+  }
+  async saveView(): Promise<void> {
+    const v = await this.store.prompt({ title: 'Save view', okLabel: 'Save', message: 'The current filters of the Work tab become a chip for everyone who shares this organization.', fields: [{ key: 'name', label: 'Name', placeholder: 'e.g. My QA queue' }] })
+    if (!v || !String(v.name).trim()) return
+    const f = this.f()
+    await this.store.saveView({ name: String(v.name).trim(), tab: 'work', filters: { team: f.team, state: f.state, assignee: f.assignee, days: f.days, cycle: f.cycle, text: this.text(), warnOnly: this.warnOnly() } })
+  }
 
   constructor() {
     effect(() => LS.set('work.filters', this.f()))
+    effect(() => { const v = this.store.applyView(); if (v && v.tab === 'work') { this.applyView(v); this.store.applyView.set(null) } })
     // reload from the tracker when the server-side filters change (first run included)
     effect(() => { this.f(); if (this.trackerOk()) void this.load() })
     effect(() => { if (this.trackerOk() && !this.store.trackerTeams().length) void this.store.loadTrackerTeams() })

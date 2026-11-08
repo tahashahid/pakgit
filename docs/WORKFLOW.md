@@ -148,6 +148,12 @@ Organization window (Cmd/Ctrl+5) puts every repository of the organization in on
 - **Releases** follows each release from created to finished: pull-request state, checks and
   review per repository, whether the branch landed, and *Finish* once everything is merged
   (back-merges the environment into the earlier ones and moves the Linear issues).
+- A release that went wrong gets *Revert…*: a revert branch and pull request per repository,
+  never a force-push. *Clean up…* in the Organization header deletes remote branches that are
+  already in the last environment.
+- The organization settings (pipeline, gates, conventions, views, calendar) can live in a
+  small git repository the team shares: Configure ▸ Sharing. PakGit shows a banner when a
+  teammate changed them and applies the change on request.
 - Quick open (Cmd/Ctrl+K) jumps to any repository, branch, issue or release branch.
 
 ## Rules that keep conflicts rare
