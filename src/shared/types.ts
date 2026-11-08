@@ -487,6 +487,18 @@ export interface OrganizationApi {
   orgNextReleases(id: string): Promise<NextRelease[]>
 }
 
+/** In-app updater state (GitHub Releases through electron-updater). */
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'up-to-date' | 'downloading' | 'ready' | 'error' | 'unsupported'
+  /** the running version */
+  version: string
+  /** the newer version found, when any */
+  available?: string
+  percent?: number
+  error?: string
+  checkedAt?: number
+}
+
 export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
 export interface WorktreeInfo { path: string; sha: string; branch: string | null; main: boolean }
 
@@ -575,6 +587,13 @@ export interface PakGitApi extends ReleaseApi, OrganizationApi {
   onRepoChanged(cb: (repo: string) => void): () => void
   onGitLog(cb: (line: GitLogLine) => void): () => void
   getGitLog(): Promise<GitLogLine[]>
+
+  /** in-app updates */
+  updateStatus(): Promise<UpdateStatus>
+  checkForUpdates(): Promise<UpdateStatus>
+  installUpdate(): Promise<void>
+  openReleases(): Promise<void>
+  onUpdateStatus(cb: (s: UpdateStatus) => void): () => void
 }
 
 // ---------- issue trackers (Linear first; Jira / GitHub Issues can implement the same shape) ----------

@@ -20,6 +20,7 @@ import type { Settings } from '@shared/types'
             <label class="field field-check"><input type="checkbox" [checked]="store.theme() === 'dark'" (change)="store.toggleTheme()" /><span>Dark theme</span></label>
           </div>
           <p class="modal-message" style="margin-top:8px">Issue tracker, pipeline and conventions are configured per organization: <a href="#" (click)="$event.preventDefault(); openOrg()">open the organization settings</a>.</p>
+          <p class="modal-message">PakGit {{ store.update()?.version ?? '' }}{{ store.update()?.state === 'ready' ? ' · ' + store.update()!.available + ' downloaded' : '' }} · <a href="#" (click)="$event.preventDefault(); store.checkForUpdates()">Check for updates</a> · <a href="#" (click)="$event.preventDefault(); store.api.openReleases()">Releases</a></p>
           <div class="modal-actions">
             <button type="button" class="btn" (click)="store.showSettings.set(false)">Cancel</button>
             <button type="submit" class="btn primary">Save</button>

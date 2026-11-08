@@ -82,7 +82,7 @@ export class OrganizationView {
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.index() && !s.indexLoading() && !s.indexError()) void s.loadIndex() })
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.overview() && !s.overviewLoading() && !s.overviewError()) void s.loadOverview() })
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.hostingStatus()) void s.refreshHosting() })
-    effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.releases().length && !s.releasesLoading()) void s.loadReleases() })
+    effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.releasesLoaded() && !s.releasesLoading()) void s.loadReleases() })
     effect(() => { if (s.perspective() === 'organization' && s.org() && !s.configSync() && !s.configSyncLoading()) void s.loadConfigSync() })
     effect(() => { const o = s.org(); if (o && s.perspective() === 'organization') void s.loadNextReleases() })
     void s.refreshTracker()

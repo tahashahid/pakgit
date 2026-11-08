@@ -168,7 +168,7 @@ export class OrgWork {
     effect(() => { const v = this.store.applyView(); if (v && v.tab === 'work') { this.applyView(v); this.store.applyView.set(null) } })
     // reload from the tracker when the server-side filters change (first run included)
     effect(() => { this.f(); if (this.trackerOk()) void this.load() })
-    effect(() => { if (this.trackerOk() && !this.store.trackerTeams().length) void this.store.loadTrackerTeams() })
+    effect(() => { if (this.trackerOk() && !this.store.trackerTeamsLoaded()) void this.store.loadTrackerTeams() })
     // Quick open ▸ issue: filter to the key, and fetch it when the tracker list did not include it
     effect(() => {
       const key = this.store.workFocusKey(); if (!key) return

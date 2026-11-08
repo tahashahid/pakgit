@@ -1,6 +1,6 @@
 {
   "name": "pakgit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "PakGit - a cross-platform Git client for Windows, macOS and Linux",
   "main": "./out/main/index.js",
   "author": "Taha Shahid",
@@ -15,30 +15,32 @@
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
     "test:backend": "esbuild test/backend-entry.ts --bundle --platform=node --format=cjs --alias:@shared=./src/shared --outfile=out/test/backend.cjs --log-level=error && node test/git-backend.test.cjs && node test/release.test.cjs && node test/organizations.test.cjs && node test/workindex.test.cjs && node test/releases.test.cjs && node test/phase4.test.cjs",
-    "build:renderer": "ng build"
+    "build:renderer": "ng build",
+    "release": "node -e \"console.log('Tag and push: git tag v' + require('./package.json').version + ' && git push origin --tags')\""
   },
   "dependencies": {
-    "chokidar": "^4.0.1",
     "@angular/common": "^22.2.0",
     "@angular/compiler": "^22.2.0",
     "@angular/core": "^22.2.0",
     "@angular/forms": "^22.2.0",
     "@angular/platform-browser": "^22.2.0",
+    "chokidar": "^4.0.1",
+    "electron-updater": "^6.8.11",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0"
   },
   "devDependencies": {
-    "@types/node": "^22.9.0",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
-    "electron-vite": "^3.0.0",
-    "typescript": "~6.0.2",
-    "esbuild": "^0.24.0",
     "@angular/build": "^22.2.6",
     "@angular/cli": "^22.2.6",
     "@angular/compiler-cli": "^22.2.0",
+    "@types/node": "^22.9.0",
     "concurrently": "^9.1.0",
-    "wait-on": "^8.0.1",
-    "cross-env": "^7.0.3"
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "~6.0.2",
+    "wait-on": "^8.0.1"
   }
 }

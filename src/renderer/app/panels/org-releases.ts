@@ -1,4 +1,4 @@
-import { Component, computed, effect, inject, signal } from '@angular/core'
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core'
 import { LS, Store } from '../store.service'
 import { Icon } from '../ui/icon'
 import { TimeAgoPipe } from '../ui/time-ago'
@@ -99,7 +99,7 @@ export class OrgReleases {
   readonly visible = computed(() => this.store.releases().filter((r) => this.showDone() || r.status === 'in-progress'))
   constructor() {
     effect(() => LS.set('releases.showDone', this.showDone()))
-    effect(() => { if (this.store.orgTab() === 'releases' && this.store.workspace()) void this.store.loadReleases() })
+    effect(() => { if (this.store.orgTab() === 'releases' && this.store.workspace() && untracked(() => !this.store.releasesLoading())) void this.store.loadReleases() })
     effect(() => { const f = this.store.releaseFocus(); if (f) setTimeout(() => this.store.releaseFocus.set(null), 4000) })
   }
   iso(ms: number): string { return new Date(ms).toISOString() }

@@ -193,7 +193,7 @@ pg-toolbar, .toolbar-host { container-type: inline-size; display: block; }
 .sticky-top { position: sticky; top: 0; z-index: 3; background: var(--bg2); }
 
 /* release planning */
-pg-release { display: flex; flex: 1; min-width: 0; min-height: 0; }
+pg-release, pg-organization, pg-org-overview, pg-org-work, pg-org-ready, pg-org-releases { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .release { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; gap: 6px; }
 .release-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); flex-wrap: wrap; }
 .release-bar label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--fg-muted); }
@@ -256,7 +256,8 @@ pg-release { display: flex; flex: 1; min-width: 0; min-height: 0; }
 
 /* phase 2: organization tabs, group chips, Work and Ready tables, Quick open */
 .org-view { overflow: hidden; }
-.org-overview { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.org-overview { flex: 1; min-width: 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; }
+.org-overview > .cards, .org-overview > .org-stats, .org-overview > .org-group-title { flex: none; }
 .org-pane { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .org-pane .panel-header { flex: none; }
 .org-tabs { margin: 0; }
@@ -313,3 +314,4 @@ button.chip:hover { border-color: var(--accent); } button.chip.active { backgrou
 .cal-grid { display: grid; grid-template-columns: 180px 160px 120px 1fr; gap: 6px 10px; align-items: center; font-size: 12px; }
 .cal-grid select, .cal-grid input { padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg1); color: var(--fg1); min-width: 0; }
 .sync-status { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.state-banner.update { background: color-mix(in srgb, var(--accent) 16%, var(--bg1)); border-bottom: 1px solid var(--border); }

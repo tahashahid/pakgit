@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { PakGitApi, GitLogLine } from '@shared/types'
+import type { PakGitApi, GitLogLine, UpdateStatus } from '@shared/types'
 
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   const r = (await ipcRenderer.invoke(channel, ...args)) as { ok: boolean; value?: T; error?: string }
@@ -154,6 +154,15 @@ const api: PakGitApi = {
   setUpstream: call('git:setUpstream'),
   emptyCommit: call('git:emptyCommit'),
   getGitLog: call('git:logHistory'),
+  updateStatus: call('update:status'),
+  checkForUpdates: call('update:check'),
+  installUpdate: call('update:install'),
+  openReleases: call('update:releases'),
+  onUpdateStatus: (cb) => {
+    const l = (_e: unknown, s: UpdateStatus) => cb(s)
+    ipcRenderer.on('update:status', l)
+    return () => ipcRenderer.removeListener('update:status', l)
+  },
   onRepoChanged: (cb) => {
     const l = (_e: unknown, repo: string) => cb(repo)
     ipcRenderer.on('repo:changed', l)

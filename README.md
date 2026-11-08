@@ -97,6 +97,39 @@ Configure… ▸ Integrations); the Personal organization has one too. Two optio
    client secret is needed.
 2. **Personal API key** from Linear ▸ Settings ▸ Security & access.
 
+## Install
+
+Installers for every platform are published on the
+[GitHub Releases](https://github.com/tahashahid/pakgit/releases) page:
+
+| Platform | File |
+|---|---|
+| macOS (Apple Silicon, Intel) | `PakGit-<version>-mac-<arch>.dmg` (or `.zip`) |
+| Windows | `PakGit-<version>-win-x64.exe` (installer) or the portable `.exe` |
+| Linux | `PakGit-<version>-linux-x64.AppImage`, `.deb` or `.rpm` |
+
+The app checks GitHub Releases for a newer version shortly after start and from Help ▸ Check for
+Updates… (also in Settings). Windows and Linux builds update in place. macOS builds update in
+place only when they are signed and notarised; unsigned builds open the releases page instead.
+Until the builds are signed, macOS shows the usual "unidentified developer" warning on first
+launch (right-click ▸ Open), and Windows SmartScreen asks to confirm.
+
+## Releasing a version
+
+1. Bump the version in `package.json` (for example `0.2.0`) and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+3. The **Release** workflow (`.github/workflows/release.yml`) builds macOS, Windows and Linux
+   installers, runs the backend tests, and uploads everything to a **draft** GitHub Release.
+4. Review the draft on GitHub and publish it. Published releases are what the in-app updater
+   sees.
+
+Signing is optional and configured through repository secrets: `CSC_LINK` (base64 `.p12`),
+`CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` for macOS
+(set `notarize: true` in `electron-builder.yml` once they exist); `WIN_CSC_LINK` and
+`WIN_CSC_KEY_PASSWORD` for Windows. Without them the workflow still produces working, unsigned
+installers. The **CI** workflow runs the typecheck and the backend tests on every push and pull
+request.
+
 ## Development
 
 ```bash

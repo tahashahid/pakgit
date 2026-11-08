@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main, angular-ui]
+  pull_request:
+
+jobs:
+  test:
+    name: Typecheck and backend tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck main, preload and renderer
+        run: npm run typecheck
+      - name: Backend tests (git, release engine, organizations, index, releases, phase 4)
+        run: |
+          git config --global user.email "ci@pakgit.local"
+          git config --global user.name "PakGit CI"
+          git config --global init.defaultBranch main
+          npm run test:backend
+      - name: Build main and preload bundles
+        run: npx electron-vite build
