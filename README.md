@@ -105,7 +105,7 @@ Installers for every platform are published on the
 | Platform | File |
 |---|---|
 | macOS (Apple Silicon, Intel) | `PakGit-<version>-mac-<arch>.dmg` (or `.zip`) |
-| Windows | `PakGit-<version>-win-x64.exe` (installer) or the portable `.exe` |
+| Windows | `PakGit-<version>-win-x64-setup.exe` (installer) or `PakGit-<version>-win-x64-portable.exe` |
 | Linux | `PakGit-<version>-linux-x64.AppImage`, `.deb` or `.rpm` |
 
 The app checks GitHub Releases for a newer version shortly after start and from Help ▸ Check for
@@ -119,7 +119,9 @@ launch (right-click ▸ Open), and Windows SmartScreen asks to confirm.
 1. Bump the version in `package.json` (for example `0.2.0`) and commit.
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 3. The **Release** workflow (`.github/workflows/release.yml`) builds macOS, Windows and Linux
-   installers, runs the backend tests, and uploads everything to a **draft** GitHub Release.
+   installers, runs the backend tests, and a final job uploads everything to a **draft** GitHub
+   Release (one job uploads, so the platforms never race for the release). It can also be
+   started by hand from the Actions tab; it then uses the version in `package.json`.
 4. Review the draft on GitHub and publish it. Published releases are what the in-app updater
    sees.
 

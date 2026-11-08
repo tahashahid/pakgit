@@ -2,6 +2,8 @@ name: Release
 
 # Builds the installers for macOS, Windows and Linux when a version tag is pushed (v0.2.0) and
 # uploads them to a draft GitHub Release, which also feeds the in-app updater once published.
+# Each platform builds without publishing; one publish job then uploads every file, so the three
+# builds never race for the release and uploads are retried.
 # Signing is optional: set the secrets below to get signed and notarised builds.
 #   macOS:   CSC_LINK (base64 .p12), CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
 #   Windows: WIN_CSC_LINK (base64 .pfx), WIN_CSC_KEY_PASSWORD
@@ -47,24 +49,28 @@ jobs:
           npm run test:backend
       - name: Build renderer, main and preload
         run: npm run build
-      - name: Package and upload to the draft release
-        run: npx electron-builder ${{ matrix.args }} --publish always
+      # Only secrets that exist become variables: electron-builder treats an empty CSC_LINK as a file path.
+      - name: Signing secrets (when configured)
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing and notarisation (skipped when the secrets are not set)
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows signing
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-      - name: Keep the installers as workflow artifacts too
+          S_CSC_LINK: ${{ secrets.CSC_LINK }}
+          S_CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          S_APPLE_ID: ${{ secrets.APPLE_ID }}
+          S_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          S_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          S_WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          S_WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID WIN_CSC_LINK WIN_CSC_KEY_PASSWORD; do
+            s="S_$v"; if [ -n "${!s}" ]; then echo "$v=${!s}" >> "$GITHUB_ENV"; echo "$v is set"; fi
+          done
+          if [ -z "$S_CSC_LINK" ]; then echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"; fi
+      - name: Package
+        run: npx electron-builder ${{ matrix.args }} --publish never
+      - name: Upload the installers for the publish job
         uses: actions/upload-artifact@v4
         with:
-          name: pakgit-${{ runner.os }}
+          name: release-${{ runner.os }}
           path: |
             dist/*.dmg
             dist/*.zip
@@ -72,5 +78,32 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/*.blockmap
             dist/latest*.yml
-          if-no-files-found: ignore
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Draft GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+      - name: List the files
+        run: find release -type f | sort
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then TAG="v$(node -p "require('./package.json').version")"; fi
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$REPO" --draft --title "PakGit ${TAG#v}" --generate-notes
+          fi
+          # gh retries transient upload failures; --clobber replaces files from an earlier run
+          find release -type f -print0 | xargs -0 gh release upload "$TAG" --repo "$REPO" --clobber
+          echo "Draft release $TAG updated: https://github.com/$REPO/releases/tag/$TAG"
