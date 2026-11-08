@@ -2,7 +2,7 @@ import { Component, computed, effect, inject, signal } from '@angular/core'
 import { LS, Store } from '../store.service'
 import { TimeAgoPipe } from '../ui/time-ago'
 import { ContextMenuService } from '../ui/context-menu'
-import type { WorkItem, WorkPart } from '@shared/types'
+import type { PullRequestStatus, WorkItem, WorkPart } from '@shared/types'
 
 interface Row { id: string; part: WorkPart; item: WorkItem }
 
@@ -57,7 +57,7 @@ interface Row { id: string; part: WorkPart; item: WorkItem }
                     @if (row.part.linkedBy === 'manual') { <span class="status-pill" title="Linked to the issue by hand">linked</span> }
                   </td>
                   <td [title]="row.part.repo">{{ row.part.repoName }}@if (row.part.group) { <span class="muted" style="font-size:11px"> · {{ row.part.group }}</span> }</td>
-                  <td [title]="row.part.ref ?? ''"><span class="mono" style="font-size:11px">{{ row.part.branch ?? '—' }}</span>@if (row.part.branchCount > 1) { <span class="muted"> +{{ row.part.branchCount - 1 }}</span> }</td>
+                  <td [title]="row.part.ref ?? ''"><span class="mono" style="font-size:11px">{{ row.part.branch ?? '—' }}</span>@if (row.part.branchCount > 1) { <span class="muted"> +{{ row.part.branchCount - 1 }}</span> }@if (prFor(row); as pr) { <a href="#" class="status-pill" [class]="'status-pill ' + (pr.state === 'merged' ? 'completed' : pr.state === 'closed' ? 'canceled' : 'started')" [title]="pr.title + ' → ' + pr.base" (click)="$event.preventDefault(); $event.stopPropagation(); open(pr.url)">#{{ pr.number }} {{ pr.state }}</a> }</td>
                   @for (e of idx.environments; track e.id) {
                     @if (row.part.envIds.includes(e.id)) { <td class="env" [class.manual]="e.id in row.part.overrides" [title]="e.id in row.part.overrides ? 'Set manually (right-click ▸ Fix tracking)' : ''">{{ row.part.inEnv[e.id] ? '✓' : (e.id in row.part.overrides ? '✗' : '') }}{{ e.id in row.part.overrides ? '*' : '' }}</td> }
                     @else { <td class="env na" title="Not an environment of this repository">·</td> }
@@ -75,7 +75,7 @@ interface Row { id: string; part: WorkPart; item: WorkItem }
           @if (store.readyTab() === 'archived') {
             <button class="btn" [disabled]="!checked().size || busy()" (click)="archive(false)">Unarchive selected</button>
           } @else {
-            <button class="btn primary" [disabled]="selectedRepos().length !== 1 || busy()" (click)="promoteSelected()" [title]="selectedRepos().length > 1 ? 'Select items of one repository at a time (cross-repository releases come in phase 3)' : 'Open the repository in the Release view with these items ticked, then Promote selected…'">Promote selected…</button>
+            <button class="btn primary" [disabled]="!checked().size || busy()" (click)="promoteSelected()" title="One release across the selected repositories: pre-flight checks, one branch name, one pull request per repository">Promote selected…</button>
             <button class="btn" [disabled]="!checked().size || busy()" (click)="archive(true)">Archive selected</button>
           }
           <button class="btn" [disabled]="busy() || !idx.repos.length" (click)="syncAll()" title="Back-merge the last environment into the earlier ones in every repository (pull requests, or direct merges for direct-merge environments)">Sync all environments</button>
@@ -95,6 +95,8 @@ export class OrgReady {
   readonly selected = signal<string | null>(null)
   readonly busy = signal(false)
   readonly push = signal<boolean>(LS.get('release.push', true))
+  /** pull requests per repository from the hosting provider, by head branch */
+  readonly prs = signal<Record<string, PullRequestStatus[]>>({})
   readonly rows = computed<Row[]>(() => {
     const idx = this.store.index(); if (!idx) return []
     const out: Row[] = []
@@ -106,7 +108,20 @@ export class OrgReady {
   constructor() {
     // default tab: the second environment, like the per-repository view
     effect(() => { const idx = this.store.index(); if (idx && this.store.readyTab() === '' ) this.store.readyTab.set(idx.environments[1]?.id ?? 'unreleased') })
+    // pull requests by branch once the hosting provider is available
+    effect(() => { const idx = this.store.index(); const hs = this.store.hostingStatus(); if (idx && hs?.available) void this.loadPrs(idx.repos.map((r) => r.path)) })
   }
+  private async loadPrs(repos: string[]): Promise<void> {
+    const out: Record<string, PullRequestStatus[]> = {}
+    await Promise.all(repos.map(async (p) => { try { out[p] = await this.store.api.hostingPullRequests(p) } catch { out[p] = [] } }))
+    this.prs.set(out)
+  }
+  prFor(row: Row): PullRequestStatus | null {
+    const b = row.part.branch; if (!b) return null
+    const list = this.prs()[row.part.repo]; if (!list) return null
+    return list.find((pr) => pr.head === b && pr.state !== 'closed') ?? list.find((pr) => pr.head === b) ?? null
+  }
+  open(url: string): void { window.open(url) }
   clearFilters(): void { this.store.readyText.set(''); this.repoFilter.set(''); this.statusFilter.set(''); this.hideDevBased.set(false); this.store.readyWarnOnly.set(false) }
   /** ready for environment id: in the previous environment of that repository (or anywhere, for its first) and not in it or any later one */
   private readyFor(p: WorkPart, envId: string): boolean {
@@ -156,9 +171,8 @@ export class OrgReady {
   }
   openInRepo(row: Row): void { this.store.openInRelease(row.part.repo, [row.part.itemId], row.part.itemId) }
   promoteSelected(): void {
-    const rows = this.selectedRows(); const repos = this.selectedRepos(); if (repos.length !== 1) return
-    this.store.openInRelease(repos[0], rows.map((r) => r.part.itemId), null)
-    this.checked.set(new Set())
+    const rows = this.selectedRows(); if (!rows.length) return
+    this.store.releaseDraft.set(rows.map((r) => ({ repo: r.part.repo, repoName: r.part.repoName, itemId: r.part.itemId, issueKey: r.part.issueKey, title: r.item.issue?.title, ref: r.part.ref, commits: r.part.commits })))
   }
   async archive(archived: boolean): Promise<void> { await this.archiveRows(this.selectedRows(), archived) }
   private async archiveRows(rows: Row[], archived: boolean): Promise<void> {
@@ -207,7 +221,8 @@ export class OrgReady {
     const p = row.part
     this.cm.open(e, [
       { label: `Open in ${p.repoName} ▸ Release`, onClick: () => this.openInRepo(row) },
-      { label: 'Promote…', onClick: () => { this.store.openInRelease(p.repo, [...new Set([...[...this.checked()].filter((id) => id.startsWith(p.repo + '::')).map((id) => id.slice(p.repo.length + 2)), p.itemId])], null) } },
+      { label: 'Promote…', onClick: () => { if (!this.checked().has(row.id)) this.toggle(row.id, true); this.promoteSelected() } },
+      { label: `Promote in ${p.repoName} only (per-repository Release view)`, onClick: () => { this.store.openInRelease(p.repo, [p.itemId], null) } },
       { label: 'Fix tracking… (which environments it is on)', onClick: () => void this.fixTracking(row) },
       ...(Object.keys(p.overrides).length ? [{ label: 'Reset tracking to detected', onClick: () => void this.resetTracking(row) }] : []),
       ...(p.issueKey ? (p.linkedBy === 'manual' ? [{ label: 'Unlink from issue', onClick: () => void this.unlink(row) }] : []) : [{ label: 'Link to issue…', onClick: () => void this.linkToIssue(row) }]),

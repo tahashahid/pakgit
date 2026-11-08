@@ -6,8 +6,8 @@ export const LINEAR_AUTHORIZE_URL = 'https://linear.app/oauth/authorize'
 export const LINEAR_TOKEN_URL = 'https://api.linear.app/oauth/token'
 export const LINEAR_REVOKE_URL = 'https://api.linear.app/oauth/revoke'
 
-interface GqlIssue { identifier: string; title: string; url: string; branchName: string; updatedAt?: string; priority?: number; team?: { key: string } | null; state: { name: string; type: string }; assignee?: { name: string; isMe?: boolean } | null }
-const FIELDS = 'identifier title url branchName updatedAt priority team { key } state { name type } assignee { name isMe }'
+interface GqlIssue { identifier: string; title: string; url: string; branchName: string; updatedAt?: string; priority?: number; team?: { key: string } | null; state: { name: string; type: string }; assignee?: { name: string; isMe?: boolean } | null; attachments?: { nodes: { url: string }[] } | null }
+const FIELDS = 'identifier title url branchName updatedAt priority team { key } state { name type } assignee { name isMe } attachments(first: 20) { nodes { url } }'
 
 export class LinearProvider implements TrackerProvider {
   readonly id = 'linear' as const
@@ -77,7 +77,7 @@ export class LinearProvider implements TrackerProvider {
     const t = i.state.type
     return {
       key: i.identifier, title: i.title, url: i.url, status: i.state.name, branchName: i.branchName, assignee: i.assignee?.name, assigneeIsMe: i.assignee?.isMe ?? false,
-      team: i.team?.key ?? i.identifier.split('-')[0], updatedAt: i.updatedAt, priority: i.priority,
+      team: i.team?.key ?? i.identifier.split('-')[0], updatedAt: i.updatedAt, priority: i.priority, links: i.attachments?.nodes.map((a) => a.url).filter(Boolean) ?? [],
       statusType: t === 'backlog' || t === 'unstarted' || t === 'started' || t === 'completed' || t === 'canceled' ? t : 'unknown'
     }
   }
@@ -177,6 +177,12 @@ export class LinearProvider implements TrackerProvider {
     const id = await this.issueId(k)
     await this.gql(`mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }`, { id, stateId: state.id })
     const cached = this.cache.get(k); if (cached) this.cache.set(k, { ...cached, status: state.name, statusType: state.type === 'backlog' || state.type === 'unstarted' || state.type === 'started' || state.type === 'completed' || state.type === 'canceled' ? state.type : 'unknown' })
+  }
+
+  async attachPullRequest(key: string, url: string, title?: string): Promise<void> {
+    const id = await this.issueId(key)
+    await this.gql(`mutation($id: String!, $url: String!, $title: String) { attachmentLinkGitHubPR(issueId: $id, url: $url, title: $title) { success } }`, { id, url, title: title ?? null })
+    this.cache.delete(this.normalizeKey(key))
   }
 
   async assignToMe(key: string): Promise<void> {

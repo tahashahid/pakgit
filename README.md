@@ -39,6 +39,15 @@ See [ANALYSIS.md](ANALYSIS.md) for the SmartGit feature analysis this design is 
   unmerged release branches, issues partly promoted across repositories); new-organization
   wizard from the repositories' hosting owner; export/import of an organization file (remote
   URLs only, no secrets)
+- **Releases across repositories** (phase 3): *Promote selected…* in the Ready tab runs the
+  pre-flight checks (tracker state, partly promoted, dev-based, freeze, previous environment;
+  each off / warn / block per environment), creates one branch name in every repository
+  involved in deploy order, opens one pull request per repository on GitHub (through the gh
+  CLI or a token; compare-page links elsewhere) and records a release. The Releases tab shows
+  each repository's pull request (state, checks, review), whether it landed, a pause on a
+  conflict with Resume, Finish (back-merge + Linear states) and release notes. Environments
+  can be frozen; deployed-version probes (HTTP JSON, HTTP text, git tag) show what each
+  environment runs
 - **Planning across repositories**: a work-item index merges every repository's release
   analysis by issue key. *Work* tab: tracker issues × repositories with team, status, assignee,
   cycle and date filters, start work in several repositories at once, link a branch that follows
@@ -118,8 +127,8 @@ src/shared/    types shared between processes
 
 ## Roadmap
 
-- Organizations phase 3 (docs/ORGANIZATIONS.md): cross-repository releases with gates, release
-  records, GitHub pull-request state through `gh`, deployed-version probes
+- Organizations phase 4 (docs/ORGANIZATIONS.md): configuration-repository sync, Slack
+  notifications, Linear Releases sync, revert, branch cleanup, Jira / GitHub Issues
 - Hosting providers (GitHub / GitLab / Bitbucket / Azure DevOps): pull requests, reviews
 - Three-way merge editor (today: take ours / theirs, or edit externally and mark resolved)
 - Split commit in interactive rebase; rebase across merge commits

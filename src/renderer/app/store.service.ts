@@ -1,8 +1,10 @@
 import { Injectable, computed, effect, signal } from '@angular/core'
-import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, TrackerStatus, TrackerTeam, WorkIndex, WorkspaceState, WorktreeInfo } from '@shared/types'
+import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, HostingStatus, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, ReleaseRecord, ReleaseSelection, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, TrackerStatus, TrackerTeam, WorkIndex, WorkspaceState, WorktreeInfo } from '@shared/types'
 
 export type Perspective = 'standard' | 'log' | 'worktree' | 'release' | 'organization'
-export type OrgTab = 'overview' | 'work' | 'ready'
+export type OrgTab = 'overview' | 'work' | 'ready' | 'releases'
+/** what the Release dialog opens with: the selected parts plus display names */
+export type ReleaseDraft = (ReleaseSelection & { repoName: string })[]
 export type Theme = 'light' | 'dark'
 export interface Toast { id: number; kind: 'error' | 'info' | 'success'; text: string }
 export interface DialogField { key: string; label: string; value?: string; type?: 'text' | 'textarea' | 'checkbox' | 'select'; options?: string[]; placeholder?: string }
@@ -79,6 +81,15 @@ export class Store {
   /** Ready ▸ Promote / open: item ids to tick and the item to select when the Release view opens */
   readonly releasePreselect = signal<{ check: string[]; focus: string | null } | null>(null)
   readonly trackerTeams = signal<TrackerTeam[]>([])
+  // phase 3: releases, hosting
+  readonly releases = signal<ReleaseRecord[]>([])
+  readonly releasesLoading = signal(false)
+  readonly hostingStatus = signal<HostingStatus | null>(null)
+  /** Ready ▸ Promote selected…: the Release dialog is open with this selection */
+  readonly releaseDraft = signal<ReleaseDraft | null>(null)
+  /** release id to highlight in the Releases tab once */
+  readonly releaseFocus = signal<string | null>(null)
+  readonly inProgressReleases = computed(() => this.releases().filter((r) => r.status === 'in-progress').length)
 
   readonly effectiveLogLimit = computed(() => this.logLimit() || this.settings()?.logLimit || 400)
   readonly singleFile = computed(() => (this.selectedFiles().length === 1 ? this.selectedFiles()[0] : null))
@@ -198,7 +209,7 @@ export class Store {
   async switchOrg(id: string): Promise<void> {
     if (id === this.activeOrgId()) return
     this.workspace.set(await this.api.orgSetActive(id)); this.org.set(await this.api.orgGet(id))
-    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null); this.index.set(null); this.trackerTeams.set([]); this.orgGroup.set(null); this.indexError.set(null); this.overviewError.set(null); this.readyTab.set(''); this.readyText.set('')
+    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null); this.index.set(null); this.trackerTeams.set([]); this.orgGroup.set(null); this.indexError.set(null); this.overviewError.set(null); this.readyTab.set(''); this.readyText.set(''); this.releases.set([]); this.hostingStatus.set(null)
     const list = await this.reloadRepos()
     const last = LS.get<Record<string, string>>('lastRepoByOrg', {})[id]
     const entry = list.find((r) => r.path === last) ?? list[0] ?? null
@@ -227,6 +238,13 @@ export class Store {
     return p
   }
   async loadTrackerTeams(): Promise<void> { try { this.trackerTeams.set(await this.api.trackerTeams()) } catch { this.trackerTeams.set([]) } }
+  async loadReleases(): Promise<void> {
+    const id = this.activeOrgId(); this.releasesLoading.set(true)
+    try { const list = await this.api.orgReleases(id); if (this.activeOrgId() === id) this.releases.set(list) } catch (e) { this.toast('error', `Releases: ${e instanceof Error ? e.message : String(e)}`) } finally { this.releasesLoading.set(false) }
+  }
+  async refreshHosting(): Promise<void> { try { this.hostingStatus.set(await this.api.orgHostingStatus(this.activeOrgId())) } catch { this.hostingStatus.set(null) } }
+  /** after a release changed: records, index and overview */
+  async afterRelease(): Promise<void> { await Promise.all([this.loadReleases(), this.loadIndex(), this.loadOverview()]) }
   /** Open a repository of the active organization in the Release view, ticking and selecting items there. */
   openInRelease(path: string, check: string[], focus: string | null): void {
     const entry = this.repos().find((r) => r.path === path); if (!entry) return

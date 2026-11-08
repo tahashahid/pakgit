@@ -8,9 +8,12 @@ import * as release from './release'
 import * as orgs from './organizations'
 import { overview as orgOverview } from './overview'
 import * as workindex from './workindex'
+import * as releases from './releases'
+import { probeRepo } from './probes'
+import { configureHostingFor, hostingFor } from './hosting'
 import { configureTrackerFor, setActiveTrackerOrg, tracker, trackerFor } from './tracker'
 import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
-import type { BranchTarget, CommitOptions, DiffRequest, FileArea, IssueQuery, OrgExport, Organization, PrepareOptions, RepoEntry, RepoPipelineOverride, StartWorkRequest, TrackerAuth, TrackerConfig, TrackerSettings } from '@shared/types'
+import type { BranchTarget, CommitOptions, CreateReleaseRequest, DiffRequest, FileArea, Freeze, IssueQuery, OrgExport, Organization, PrepareOptions, ProbeResult, ReleaseSelection, RepoEntry, RepoPipelineOverride, StartWorkRequest, TrackerAuth, TrackerConfig, TrackerSettings } from '@shared/types'
 
 // ---------- repository registry (per organization, see organizations.ts) ----------
 
@@ -33,10 +36,10 @@ async function fillRemotes(): Promise<void> {
 
 import type { Settings } from '@shared/types'
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
-const defaultSettings: Settings = { gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true }
-const emptyAuth = (): TrackerAuth => ({ linearApiKey: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0 })
+const defaultSettings: Settings = { gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true, ghPath: '' }
+const emptyAuth = (): TrackerAuth => ({ linearApiKey: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0, githubToken: '' })
 // Secrets are encrypted at rest with the OS keychain when available (Electron safeStorage).
-const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken'] as const
+const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken', 'githubToken'] as const
 const enc = (v: string): string => (v && safeStorage.isEncryptionAvailable() ? 'enc:' + safeStorage.encryptString(v).toString('base64') : v)
 const dec = (v: string): string => { try { return v?.startsWith('enc:') && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(v.slice(4), 'base64')) : v ?? '' } catch { return '' } }
 interface SettingsFile extends Settings { auth?: Record<string, TrackerAuth>; tracker?: Record<string, unknown> }
@@ -61,6 +64,7 @@ function saveSettings(s: Settings): Settings {
   const merged: SettingsFile = { ...file, ...defaultSettings, ...s, auth: file.auth }
   writeSettingsFile(merged)
   git.setGitExecutable(merged.gitPath)
+  for (const o of orgs.listOrgs()) configureOrgHosting(o.id)
   return loadSettings()
 }
 const authKey = (orgId: string, provider: string) => `${orgId}:${provider}`
@@ -83,6 +87,12 @@ function configureOrgTracker(orgId: string): void {
     saveAuth(orgId, cfg.provider, authPatch)
   })
 }
+/** The organization's hosting provider with this person's token and the configured gh path. */
+function configureOrgHosting(orgId: string): void {
+  const org = orgs.getOrg(orgId)
+  configureHostingFor(orgId, org.hosting, { token: loadAuth(orgId, 'github').githubToken, ghPath: loadSettings().ghPath })
+}
+const releaseDeps = (orgId: string) => ({ tracker: trackerFor(orgId), hosting: hostingFor(orgId) })
 /** Legacy single tracker block in settings.json (pre-organizations) -> Personal organization config + auth. */
 function legacyTracker(): { config: TrackerConfig; auth: TrackerAuth } | null {
   const t = readSettingsFile().tracker as Record<string, string | number> | undefined
@@ -271,7 +281,7 @@ function registerIpc(): void {
   // ---- organizations
   handle('org:workspace', () => orgs.workspace())
   handle('org:get', (id: string) => orgs.getOrg(id))
-  handle('org:setActive', (id: string) => { const w = orgs.setActive(id); setActiveTrackerOrg(id); configureOrgTracker(id); return w })
+  handle('org:setActive', (id: string) => { const w = orgs.setActive(id); setActiveTrackerOrg(id); configureOrgTracker(id); configureOrgHosting(id); return w })
   handle('org:create', async (input: { name: string; color?: string; repoPaths?: string[]; moveTrackerFrom?: string | null }) => {
     const from = input.moveTrackerFrom ? orgs.getOrg(input.moveTrackerFrom) : null
     const o = orgs.createOrg({ name: input.name, color: input.color, tracker: from ? from.tracker : undefined })
@@ -282,13 +292,13 @@ function registerIpc(): void {
       configureOrgTracker(from.id)
     }
     for (const p of input.repoPaths ?? []) orgs.moveRepo(p, o.id)
-    configureOrgTracker(o.id)
+    configureOrgTracker(o.id); configureOrgHosting(o.id)
     return orgs.getOrg(o.id)
   })
   handle('org:update', (id: string, patch: Partial<Omit<Organization, 'id' | 'createdAt'>>) => {
     if (patch.pipeline) patch.pipeline = release.validatePipeline(patch.pipeline)
     const o = orgs.updateOrg(id, patch)
-    configureOrgTracker(id)
+    configureOrgTracker(id); configureOrgHosting(id)
     return o
   })
   handle('org:delete', (id: string) => { const w = orgs.deleteOrg(id); setActiveTrackerOrg(w.active); return w })
@@ -307,13 +317,35 @@ function registerIpc(): void {
     await fillRemotes()
     const data = JSON.parse(readFileSync(r.filePaths[0], 'utf8')) as OrgExport
     const res = orgs.importOrg(data)
-    configureOrgTracker(res.org.id)
+    configureOrgTracker(res.org.id); configureOrgHosting(res.org.id)
     return res
   })
   handle('org:overview', (id: string, opts?: { refresh?: boolean }) => orgOverview(id, { refresh: !!opts?.refresh, tracker: trackerFor(id) }))
   handle('org:index', (id: string, opts?: { refresh?: boolean }) => workindex.index(id, { refresh: !!opts?.refresh, tracker: trackerFor(id) }))
   handle('org:startWork', (id: string, req: StartWorkRequest) => workindex.startWork(id, req))
   handle('org:suggestBranch', (id: string, issue: { key: string; title: string; branchName?: string }) => workindex.suggestBranch(id, issue))
+  // ---- phase 3: hosting, gates, releases, freeze, probes
+  handle('org:hostingStatus', (id: string) => hostingFor(id).status())
+  handle('org:hostingSetToken', (id: string, token: string) => { saveAuth(id, 'github', { githubToken: token.trim() }); configureOrgHosting(id) })
+  handle('org:evaluateGates', (id: string, envId: string, selection: ReleaseSelection[]) => releases.checkGates(id, envId, selection, releaseDeps(id)))
+  handle('org:releases', (id: string) => releases.listReleases(id))
+  handle('org:createRelease', (id: string, req: CreateReleaseRequest) => releases.createRelease(id, req, releaseDeps(id)))
+  handle('org:resumeRelease', (id: string, releaseId: string, repo: string, opts: { skipRemaining: boolean }) => releases.resumeRelease(id, releaseId, repo, opts, releaseDeps(id)))
+  handle('org:dropReleaseRepo', (id: string, releaseId: string, repo: string, reason: string) => releases.dropRepo(id, releaseId, repo, reason))
+  handle('org:refreshRelease', (id: string, releaseId: string) => releases.refreshRelease(id, releaseId, releaseDeps(id)))
+  handle('org:finishRelease', (id: string, releaseId: string, opts: { push: boolean; updateTracker: boolean }) => releases.finishRelease(id, releaseId, opts, releaseDeps(id)))
+  handle('org:dropRelease', (id: string, releaseId: string, reason: string) => releases.dropRelease(id, releaseId, reason))
+  handle('org:releaseNotes', (id: string, releaseId: string) => releases.releaseNotes(id, releaseId))
+  handle('org:setFreeze', (id: string, envId: string, freeze: Freeze | null) => orgs.setFreeze(id, envId, freeze))
+  handle('org:probe', async (id: string, repo?: string) => {
+    const out: Record<string, ProbeResult[]> = {}
+    for (const r of orgs.orgRepos(id).filter((x) => !repo || x.path === repo)) {
+      if (!existsSync(r.path)) continue
+      try { const p = await release.repoPipeline(r.path); const res = await probeRepo(r.path, p.resolved, p.override.probes, !!repo); if (res.length) out[r.path] = res } catch { /* no probes */ }
+    }
+    return out
+  })
+  handle('hosting:pullRequests', (repo: string, fresh?: boolean) => hostingFor(orgs.orgOfRepo(repo)).listPullRequests(repo, !!fresh))
   handle('org:trackerStatus', async (id: string) => {
     const cfg = orgs.getOrg(id).tracker; const auth = loadAuth(id, cfg.provider)
     const st = await trackerFor(id).status()
@@ -478,7 +510,7 @@ app.whenReady().then(() => {
   const legacy = legacyTracker()
   const m = orgs.ensureMigrated(legacy?.config ?? null)
   if (m.migrated && legacy) { saveAuth(orgs.PERSONAL, legacy.config.provider, legacy.auth); const f = readSettingsFile(); delete f.tracker; writeSettingsFile(f) }
-  for (const o of orgs.listOrgs()) configureOrgTracker(o.id)
+  for (const o of orgs.listOrgs()) { configureOrgTracker(o.id); configureOrgHosting(o.id) }
   setActiveTrackerOrg(orgs.activeOrgId())
   void fillRemotes()
   release.setReleaseConfigDir(app.getPath('userData'))

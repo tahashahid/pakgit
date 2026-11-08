@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
-import type { Conventions, EnvConfig, ImportResult, OrgExport, Organization, OrganizationSummary, OwnerProposal, RepoEntry, RepoPipelineOverride, TrackerConfig, WorkspaceState } from '@shared/types'
+import type { Conventions, EnvConfig, Freeze, HostingConfig, ImportResult, OrgExport, Organization, OrganizationSummary, OwnerProposal, RepoEntry, RepoPipelineOverride, TrackerConfig, WorkspaceState } from '@shared/types'
 
 export const PERSONAL = 'personal'
 const VERSION = 1
@@ -22,6 +22,9 @@ const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file),
 
 export const defaultConventions = (): Conventions => ({ branchPattern: '{user}/{key}-{slug}', releasePattern: 'release/{env}-{week}' })
 export const defaultTracker = (): TrackerConfig => ({ provider: 'none', authMethod: 'oauth', linearClientId: '', stateOnStart: 'In Progress' })
+export const defaultHosting = (): HostingConfig => ({ provider: 'auto', prTemplate: '', reviewers: [], labels: [], draft: false, attachPrsToIssues: false })
+/** The organization's folder (releases.json lives next to org.json). */
+export function orgDirectory(id: string): string { return orgDir(id) }
 const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2', '#dc2626', '#4b5563']
 
 export function slugify(name: string): string { return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'org' }
@@ -48,7 +51,7 @@ export function parseIdentity(identity: string | null | undefined): { host: stri
 // ---------- workspace ----------
 
 function emptyPersonal(): Organization {
-  return { id: PERSONAL, name: 'Personal', color: COLORS[0], groups: [], pipeline: null, conventions: defaultConventions(), tracker: defaultTracker(), howWeWork: '', createdAt: Date.now() }
+  return { id: PERSONAL, name: 'Personal', color: COLORS[0], groups: [], pipeline: null, conventions: defaultConventions(), tracker: defaultTracker(), hosting: defaultHosting(), freezes: {}, deployOrder: [], howWeWork: '', createdAt: Date.now() }
 }
 
 /** One-time migration from the flat layout (repositories.json + groups.json at the root) into the Personal organization. Idempotent. */
@@ -91,11 +94,11 @@ export function setActive(id: string): WorkspaceState {
 export function getOrg(id: string): Organization {
   const o = readJson<Organization | null>(orgFile(id), null)
   if (!o) { if (id === PERSONAL) { const p = emptyPersonal(); writeJson(orgFile(PERSONAL), p); return p } throw new Error(`Unknown organization "${id}"`) }
-  return { ...emptyPersonal(), ...o, conventions: { ...defaultConventions(), ...(o.conventions ?? {}) }, tracker: { ...defaultTracker(), ...(o.tracker ?? {}) }, groups: o.groups ?? [] }
+  return { ...emptyPersonal(), ...o, conventions: { ...defaultConventions(), ...(o.conventions ?? {}) }, tracker: { ...defaultTracker(), ...(o.tracker ?? {}) }, hosting: { ...defaultHosting(), ...(o.hosting ?? {}) }, freezes: o.freezes ?? {}, deployOrder: o.deployOrder ?? [], groups: o.groups ?? [] }
 }
 export function saveOrg(org: Organization): Organization { writeJson(orgFile(org.id), org); return org }
 
-export function createOrg(input: { name: string; color?: string; pipeline?: EnvConfig | null; conventions?: Partial<Conventions>; tracker?: Partial<TrackerConfig>; howWeWork?: string; groups?: string[] }): Organization {
+export function createOrg(input: { name: string; color?: string; pipeline?: EnvConfig | null; conventions?: Partial<Conventions>; tracker?: Partial<TrackerConfig>; hosting?: Partial<HostingConfig>; deployOrder?: string[]; freezes?: Record<string, Freeze>; howWeWork?: string; groups?: string[] }): Organization {
   const name = input.name.trim()
   if (!name) throw new Error('Organization name is empty')
   let id = slugify(name); if (id === PERSONAL) id = 'personal-org'
@@ -105,7 +108,8 @@ export function createOrg(input: { name: string; color?: string; pipeline?: EnvC
   const org: Organization = {
     id, name, color: input.color ?? (COLORS.find((c) => !used.has(c)) ?? COLORS[1]), groups: input.groups ?? [],
     pipeline: input.pipeline ?? null, conventions: { ...defaultConventions(), ...(input.conventions ?? {}) },
-    tracker: { ...defaultTracker(), ...(input.tracker ?? {}) }, howWeWork: input.howWeWork ?? '', createdAt: Date.now()
+    tracker: { ...defaultTracker(), ...(input.tracker ?? {}) }, hosting: { ...defaultHosting(), ...(input.hosting ?? {}) }, freezes: input.freezes ?? {}, deployOrder: input.deployOrder ?? [],
+    howWeWork: input.howWeWork ?? '', createdAt: Date.now()
   }
   saveOrg(org); writeJson(reposFile(id), [])
   return org
@@ -127,6 +131,32 @@ export function deleteOrg(id: string): WorkspaceState {
   rmSync(orgDir(id), { recursive: true, force: true })
   if (readWorkspace().active === id) setActive(PERSONAL)
   return workspace()
+}
+
+/** A freeze is active until the end of its until-day (local time); null = until lifted by hand. */
+export function freezeActive(f: Freeze | null | undefined, now = Date.now()): boolean {
+  if (!f) return false
+  if (!f.until) return true
+  const end = new Date(f.until + 'T23:59:59')
+  return isNaN(end.getTime()) ? true : now <= end.getTime()
+}
+export function setFreeze(id: string, envId: string, freeze: Freeze | null): Organization {
+  const org = getOrg(id)
+  const freezes = { ...org.freezes }
+  if (freeze && (freeze.note.trim() || freeze.until)) freezes[envId] = { note: freeze.note.trim(), until: freeze.until || null }; else delete freezes[envId]
+  return saveOrg({ ...org, freezes })
+}
+/** Active freezes only (expired ones are dropped on read). */
+export function activeFreezes(org: Organization, now = Date.now()): Record<string, Freeze> {
+  return Object.fromEntries(Object.entries(org.freezes).filter(([, f]) => freezeActive(f, now)))
+}
+/** Repository identity used in deploy order and release records: the remote, else the path. */
+export const repoIdentityKey = (r: Pick<RepoEntry, 'remote' | 'path'>): string => r.remote ?? r.path
+/** Repositories in deploy order: listed identities first (in order), then the rest by group and name. */
+export function deployOrdered(org: Organization, repos: RepoEntry[]): RepoEntry[] {
+  const rank = new Map(org.deployOrder.map((k, i) => [k, i]))
+  const pos = (r: RepoEntry): number => rank.get(repoIdentityKey(r)) ?? rank.get(r.path) ?? Number.MAX_SAFE_INTEGER
+  return [...repos].sort((a, b) => pos(a) - pos(b) || Number(!a.group) - Number(!b.group) || (a.group ?? '').localeCompare(b.group ?? '') || a.name.localeCompare(b.name))
 }
 
 // ---------- repositories ----------
@@ -211,7 +241,7 @@ export function exportOrg(id: string): OrgExport {
   const o = getOrg(id)
   return {
     version: 1,
-    organization: { name: o.name, color: o.color, groups: o.groups, pipeline: o.pipeline, conventions: o.conventions, tracker: o.tracker, howWeWork: o.howWeWork },
+    organization: { name: o.name, color: o.color, groups: o.groups, pipeline: o.pipeline, conventions: o.conventions, tracker: o.tracker, hosting: o.hosting, freezes: o.freezes, deployOrder: o.deployOrder, howWeWork: o.howWeWork },
     repositories: orgRepos(id).filter((r) => r.remote).map((r) => ({ remote: r.remote!, name: r.name, group: r.group ?? null }))
   }
 }

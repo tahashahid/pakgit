@@ -36,6 +36,9 @@ import type { RepoOverviewCard } from '@shared/types'
                   <div class="envs">
                     @for (e of c.environments ?? []; track e.id) { <span [class.hot]="e.ready > 0" [class.missing]="e.missing" [title]="e.missing ? 'Branch ' + e.branch + ' not found' : 'Ready for ' + e.branch + ': open in Ready'" (click)="$event.stopPropagation(); showReady(e.id)">→ {{ e.branch }} {{ e.ready }}</span> }
                   </div>
+                  @for (d of c.deployed ?? []; track d.envId) {
+                    <div [class]="d.status === 'same' ? 'muted' : 'warn'" style="font-size:12px" [title]="d.error ?? (d.deployed ? 'deployed: ' + d.deployed : '')">{{ d.status === 'same' ? '✓' : '⚠' }} {{ envBranch(c, d.envId) }} deployed: {{ d.status === 'same' ? '= branch' : d.status === 'behind' ? d.behind + ' commit(s) behind the branch' : d.status === 'ahead' ? 'ahead of the branch' : 'unknown (' + (d.error ?? 'no data') + ')' }}</div>
+                  }
                   @if (c.partlyPromoted) { <div class="warn">⚠ {{ c.partlyPromoted }} issue(s) partly promoted across repositories</div> }
                   @if (c.drift) { <div class="warn">⚠ {{ c.drift.from }} is {{ c.drift.commits }} commits ahead of {{ c.drift.to }} (sync needed)</div> }
                   @if (c.devBased) { <div class="warn">⚠ {{ c.devBased }} unreleased branch(es) cut from dev</div> }
@@ -60,6 +63,7 @@ export class OrgOverview {
     return [...map.entries()].sort((a, b) => (a[0] === '' ? 1 : b[0] === '' ? -1 : a[0].localeCompare(b[0]))).map(([name, cs]) => ({ name, cards: cs }))
   }
   shortRemote(r: string): string { return r.split('/').slice(1).join('/') }
+  envBranch(c: RepoOverviewCard, envId: string): string { return c.environments?.find((e) => e.id === envId)?.branch ?? envId }
   iso(ms: number): string { return new Date(ms).toISOString() }
   open(c: RepoOverviewCard): void { if (c.error) return; this.store.openRepo(c.repo); this.store.perspective.set('standard') }
   showPartly(): void { this.store.readyWarnOnly.set(true); this.store.orgTab.set('ready') }

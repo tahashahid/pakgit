@@ -4,7 +4,8 @@ import { dirname, join } from 'path'
 import * as git from './git'
 import { tracker } from './tracker'
 import type { TrackerProvider } from './tracker/provider'
-import type { BranchTarget, Commit, EnvConfig, Environment, PrepareOptions, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem, RepoPipeline, RepoPipelineOverride } from '@shared/types'
+import type { BranchTarget, Commit, EnvConfig, Environment, PrepareOptions, PromoteInput, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem, RepoPipeline, RepoPipelineOverride } from '@shared/types'
+export type { PromoteInput }
 import { applyOverride, normalizeRemote } from './organizations'
 
 const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return d } }
@@ -178,17 +179,31 @@ function validate(cfg: EnvConfig): EnvConfig {
 /** Validate a pipeline (organization templates use this too). */
 export function validatePipeline(cfg: EnvConfig): EnvConfig { return validate(structuredClone(cfg)) }
 /** Save a fully custom pipeline for the repository (the legacy entry point). */
-export async function saveReleaseConfig(repo: string, cfg: EnvConfig): Promise<EnvConfig> {
+/** Probes with a type and the fields that type needs; others are dropped. */
+function cleanProbes(probes: RepoPipelineOverride['probes']): RepoPipelineOverride['probes'] {
+  const out: NonNullable<RepoPipelineOverride['probes']> = {}
+  for (const [env, p] of Object.entries(probes ?? {})) {
+    if (!p || !p.type) continue
+    if ((p.type === 'http-json' || p.type === 'http-text') && !p.url?.trim()) continue
+    out[env] = { type: p.type, ...(p.url ? { url: p.url.trim() } : {}), ...(p.path ? { path: p.path.trim() } : {}), ...(p.regex ? { regex: p.regex } : {}), ...(p.tagPattern ? { tagPattern: p.tagPattern.trim() } : {}) }
+  }
+  return Object.keys(out).length ? out : undefined
+}
+export async function saveReleaseConfig(repo: string, cfg: EnvConfig, probes?: RepoPipelineOverride['probes']): Promise<EnvConfig> {
   const custom = validate(cfg)
-  await writeState(repo, 'pipeline', { mode: 'custom', custom } satisfies RepoPipelineOverride)
+  const prev = await loadOverride(repo)
+  const entry: RepoPipelineOverride = { mode: 'custom', custom }
+  const keep = cleanProbes(probes ?? prev.probes); if (keep) entry.probes = keep
+  await writeState(repo, 'pipeline', entry)
   return custom
 }
 export async function saveRepoPipeline(repo: string, override: RepoPipelineOverride): Promise<EnvConfig> {
-  if (override.mode === 'custom') return saveReleaseConfig(repo, override.custom ?? (await detectConfig(repo)))
+  if (override.mode === 'custom') return saveReleaseConfig(repo, override.custom ?? (await detectConfig(repo)), override.probes)
   const template = templateProvider(repo)
   const clean: RepoPipelineOverride = { mode: 'org', branchMap: {}, disabled: override.disabled ?? [], strategyMap: {} }
   for (const [k, v] of Object.entries(override.branchMap ?? {})) if (v && v.trim()) clean.branchMap![k] = v.trim()
   for (const [k, v] of Object.entries(override.strategyMap ?? {})) if (v) clean.strategyMap![k] = v
+  const probes = cleanProbes(override.probes); if (probes) clean.probes = probes
   if (template) applyOverride(withDefaults(template), clean) // throws when everything is disabled
   await writeState(repo, 'pipeline', clean)
   return (await repoPipeline(repo)).resolved
@@ -223,6 +238,19 @@ const ENV_SUFFIX = /-(dev|develop|stage|staging|main|prod|production)$/i
 const run = (repo: string, args: string[], allowFail = false) => git.run(args, { cwd: repo, allowFail })
 
 /** Resolve an environment branch to the ref to analyse: remote-tracking ref when present, else local. */
+export async function resolveEnvRef(repo: string, cfg: EnvConfig, name: string): Promise<string | null> { return envRef(repo, cfg, name) }
+/** The branch exists locally or on the remote. */
+export async function branchExists(repo: string, remote: string, name: string): Promise<boolean> {
+  for (const c of [`refs/heads/${name}`, `refs/remotes/${remote}/${name}`]) if ((await run(repo, ['rev-parse', '--verify', '-q', c], true)).code === 0) return true
+  return false
+}
+/** Ref of a branch for comparisons: remote-tracking when present, else local, else null. */
+export async function branchRef(repo: string, remote: string, name: string): Promise<string | null> {
+  for (const c of [`${remote}/${name}`, name]) { const r = await run(repo, ['rev-parse', '--verify', '-q', c.startsWith(remote + '/') ? `refs/remotes/${c}` : `refs/heads/${c}`], true); if (r.code === 0) return c }
+  return null
+}
+/** The current git user name of a repository (for release records). */
+export async function gitUserName(repo: string): Promise<string> { const r = await run(repo, ['config', '--get', 'user.name'], true); return r.code === 0 ? r.stdout.trim() : '' }
 async function envRef(repo: string, cfg: EnvConfig, name: string): Promise<string | null> {
   for (const candidate of [`${cfg.remote}/${name}`, name]) {
     const r = await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${candidate}`], true)
@@ -445,8 +473,6 @@ async function checkoutEnv(repo: string, cfg: EnvConfig, name: string): Promise<
   if (hasRemote) await run(repo, ['merge', '--ff-only', `${cfg.remote}/${name}`])
 }
 
-export interface PromoteInput { id: string; ref: string | null; commits: string[] }
-
 /** Merge each item (feature branch, or cherry-pick its commits) into the current branch; stop at the first conflict. */
 async function applyItems(repo: string, items: PromoteInput[], target: string): Promise<PromoteResult> {
   const res: PromoteResult = { merged: [], conflict: null, skipped: [], message: '' }
@@ -621,6 +647,15 @@ async function backMerge(repo: string, cfg: EnvConfig, from: Environment, push: 
   return res
 }
 
+/** Propagate an environment into every environment before it (used when a release into it is finished). */
+export async function syncFrom(repo: string, envId: string, push: boolean): Promise<PromoteResult> {
+  const cfg = await releaseConfig(repo)
+  const env = envById(cfg, envId)
+  if (cfg.environments.indexOf(env) === 0) return { merged: [], conflict: null, skipped: [], message: `${env.branch} is the first environment; nothing to back-merge` }
+  const res = await backMerge(repo, cfg, env, push)
+  res.message ||= res.merged.length ? `Synced: ${res.merged.join(', ')}${push ? ' (pushed)' : ''}` : `Nothing to sync${res.skipped.length ? ` (${res.skipped.join(', ')})` : ''}`
+  return res
+}
 export async function syncEnvironments(repo: string, push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
   const res = await backMerge(repo, cfg, lastEnv(cfg), push)

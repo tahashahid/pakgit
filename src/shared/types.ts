@@ -125,6 +125,8 @@ export interface Settings {
   autoFetchMinutes: number
   logLimit: number
   confirmDiscard: boolean
+  /** GitHub CLI executable; empty = auto-detect */
+  ghPath: string
 }
 
 // ---------- organizations ----------
@@ -136,13 +138,15 @@ export interface TrackerConfig {
   linearClientId: string
   stateOnStart: string
 }
-/** Per-person part of a tracker connection, stored encrypted and never exported. */
+/** Per-person part of a connection (tracker or hosting), stored encrypted and never exported. */
 export interface TrackerAuth {
   linearApiKey: string
   linearClientSecret: string
   linearAccessToken: string
   linearRefreshToken: string
   linearTokenExpiry: number
+  /** GitHub personal access token used when the gh CLI is not signed in */
+  githubToken: string
 }
 export interface Conventions {
   /** branch name for "Start work": {user}, {key}, {slug} */
@@ -159,9 +163,103 @@ export interface Organization {
   pipeline: EnvConfig | null
   conventions: Conventions
   tracker: TrackerConfig
+  /** hosting provider (pull-request state and creation); shareable part only */
+  hosting: HostingConfig
+  /** environment id -> active freeze (promotions into it warn or block) */
+  freezes: Record<string, Freeze>
+  /** repository identities (remote, else path) in deploy order; unlisted repositories follow by name */
+  deployOrder: string[]
   howWeWork: string
   createdAt: number
 }
+
+// ---------- hosting (phase 3): pull-request state and creation ----------
+
+export type HostingId = 'none' | 'github'
+export interface HostingConfig {
+  /** auto = GitHub when the remote is on github.com and gh or a token is available */
+  provider: 'auto' | 'github' | 'none'
+  /** pull-request body template; tokens {name}, {env}, {items}, {repo} */
+  prTemplate: string
+  reviewers: string[]
+  labels: string[]
+  draft: boolean
+  /** attach the pull request to the Linear issue when PakGit opens one */
+  attachPrsToIssues: boolean
+}
+export interface HostingStatus { provider: HostingId; available: boolean; account?: string; via?: 'gh' | 'token'; error?: string }
+export interface PullRequestStatus {
+  number: number
+  url: string
+  state: 'open' | 'merged' | 'closed'
+  title: string
+  draft: boolean
+  head: string
+  base: string
+  headSha?: string
+  mergeable?: 'mergeable' | 'conflicting' | 'unknown'
+  reviewDecision: 'approved' | 'changes-requested' | 'review-required' | 'none'
+  checks: 'success' | 'failure' | 'pending' | 'none'
+  mergedAt?: string | null
+  updatedAt?: string
+}
+
+// ---------- gates, freeze, probes (phase 3) ----------
+
+export type GateId = 'tracker-state' | 'partly-promoted' | 'dev-based' | 'frozen' | 'previous-env'
+export type GateMode = 'off' | 'warn' | 'block'
+export interface GateConfig { id: GateId; mode: GateMode; /** tracker-state: allowed state names; empty = any */ states?: string[] }
+export interface GateResult { id: GateId; label: string; mode: GateMode; ok: boolean; message: string; details: string[] }
+export interface GateCheck { results: GateResult[]; blocked: GateId[]; warnings: GateId[] }
+export interface Freeze { note: string; /** yyyy-mm-dd, lifts automatically after that day; null = until lifted by hand */ until: string | null }
+export interface Probe { type: 'http-json' | 'http-text' | 'git-tag'; url?: string; /** http-json: dot path to the commit/version field */ path?: string; /** http-text: regular expression, first capture group */ regex?: string; /** git-tag: glob of tags that mark deployments, e.g. deployed/stage-* */ tagPattern?: string }
+export interface ProbeResult { envId: string; status: 'same' | 'behind' | 'ahead' | 'unknown' | 'none'; deployed?: string; behind?: number; ahead?: number; error?: string; at: number }
+
+// ---------- releases (phase 3): one object per cross-repository release ----------
+
+export interface PromoteInput { id: string; ref: string | null; commits: string[] }
+export interface ReleaseSelection { repo: string; itemId: string; issueKey: string | null; title?: string; ref: string | null; commits: string[] }
+export interface ReleaseItemRef { id: string; issueKey: string | null; title?: string; url?: string; repos: string[] }
+export interface ReleaseRepo {
+  path: string
+  remote: string | null
+  name: string
+  branch: string
+  base: string
+  items: string[]
+  /** what was asked for, kept so an errored repository can be retried */
+  inputs: PromoteInput[]
+  merged: string[]
+  skipped: string[]
+  /** stopped on a conflict; remaining items are merged on Resume */
+  paused: { conflict: string; remaining: PromoteInput[] } | null
+  dropped: string | null
+  pr: PullRequestStatus | null
+  /** compare page opened in the browser when no hosting provider is connected */
+  prUrl: string | null
+  /** the release branch is contained in the environment branch */
+  onEnv: boolean
+  error: string | null
+}
+export interface ReleaseRecord {
+  id: string
+  name: string
+  envId: string
+  envName: string
+  envBranch: string
+  createdAt: number
+  createdBy: string
+  items: ReleaseItemRef[]
+  repos: ReleaseRepo[]
+  gates: GateResult[]
+  overridden: GateId[]
+  status: 'in-progress' | 'finished' | 'dropped'
+  finishedAt: number | null
+  notes: string
+  options: { push: boolean; openPr: boolean; draft: boolean }
+}
+export interface CreateReleaseRequest { envId: string; name: string; selection: ReleaseSelection[]; options: { push: boolean; openPr: boolean; draft: boolean; updateTracker: boolean }; overrides: GateId[] }
+export interface FinishReleaseResult { release: ReleaseRecord; results: { repo: string; result: PromoteResult }[] }
 export interface OrganizationSummary { id: string; name: string; color: string; repoCount: number }
 export interface WorkspaceState { version: number; active: string; organizations: OrganizationSummary[] }
 /** repositories sharing a hosting owner, proposed as an organization */
@@ -179,6 +277,8 @@ export interface RepoPipelineOverride {
   disabled?: string[]
   strategyMap?: Record<string, Environment['strategy']>
   custom?: EnvConfig
+  /** environment id -> how to read the deployed version of this repository there */
+  probes?: Record<string, Probe>
 }
 export interface RepoPipeline { override: RepoPipelineOverride; template: EnvConfig | null; resolved: EnvConfig }
 export interface RepoOverviewCard {
@@ -199,9 +299,13 @@ export interface RepoOverviewCard {
   /** issues with a part in this repository that sit on different environments across the organization */
   partlyPromoted?: number
   fromCache?: boolean
+  /** deployed-version probe results (only environments with a probe) */
+  deployed?: ProbeResult[]
 }
 export interface OrgOverview {
   org: OrganizationSummary
+  /** active freezes by environment id */
+  freezes: Record<string, Freeze>
   repos: RepoOverviewCard[]
   totals: { ready: { id: string; name: string; count: number }[]; unreleased: number; warnings: number; partlyPromoted: number }
   generatedAt: number
@@ -295,6 +399,25 @@ export interface OrganizationApi {
   orgStartWork(id: string, req: StartWorkRequest): Promise<StartWorkResult>
   /** branch name for an issue from the organization's convention (or the tracker's suggestion) */
   orgSuggestBranch(id: string, issue: { key: string; title: string; branchName?: string }): Promise<string>
+  // phase 3: hosting, gates, releases, freeze, probes
+  orgHostingStatus(id: string): Promise<HostingStatus>
+  orgHostingSetToken(id: string, token: string): Promise<void>
+  orgEvaluateGates(id: string, envId: string, selection: ReleaseSelection[]): Promise<GateCheck>
+  orgReleases(id: string): Promise<ReleaseRecord[]>
+  orgCreateRelease(id: string, req: CreateReleaseRequest): Promise<ReleaseRecord>
+  /** continue a paused repository (after the conflict was resolved and committed); skipRemaining pushes and opens the PR without the rest */
+  orgResumeRelease(id: string, releaseId: string, repo: string, opts: { skipRemaining: boolean }): Promise<ReleaseRecord>
+  orgDropReleaseRepo(id: string, releaseId: string, repo: string, reason: string): Promise<ReleaseRecord>
+  /** re-read pull-request state and whether each branch landed in the environment */
+  orgRefreshRelease(id: string, releaseId: string): Promise<ReleaseRecord>
+  orgFinishRelease(id: string, releaseId: string, opts: { push: boolean; updateTracker: boolean }): Promise<FinishReleaseResult>
+  orgDropRelease(id: string, releaseId: string, reason: string): Promise<ReleaseRecord>
+  orgReleaseNotes(id: string, releaseId: string): Promise<string>
+  orgSetFreeze(id: string, envId: string, freeze: Freeze | null): Promise<Organization>
+  /** deployed-version probes for one repository (or every repository of the organization) */
+  orgProbe(id: string, repo?: string): Promise<Record<string, ProbeResult[]>>
+  /** pull requests of a repository from the hosting provider (cached), newest first */
+  hostingPullRequests(repo: string, fresh?: boolean): Promise<PullRequestStatus[]>
 }
 
 export interface SubmoduleInfo { path: string; sha: string; state: 'initialized' | 'uninitialized' | 'modified' | 'conflict'; ref: string }
@@ -407,6 +530,8 @@ export interface TrackerIssue {
   team?: string
   updatedAt?: string
   priority?: number
+  /** attachment URLs (pull requests attached through the hosting integration) */
+  links?: string[]
 }
 
 export interface TrackerTeam { key: string; name: string }
@@ -467,6 +592,10 @@ export interface Environment {
   strategy: 'feature-pr' | 'release-branch' | 'merge'
   /** tracker state to set when work lands here; empty = do not update */
   trackerState: string
+  /** tracker state to set when a pull request into this environment is opened; empty = do not update */
+  trackerStateOnPr?: string
+  /** pre-flight checks for promotions into this environment; missing = defaults (see gatesFor) */
+  gates?: GateConfig[]
 }
 
 export interface EnvConfig {
@@ -526,7 +655,7 @@ export interface ReleaseItem {
 export interface BranchTarget { name: string; existing: boolean }
 export interface PrepareOptions { push: boolean; openPr: boolean }
 /** a promotion that stopped on a conflict and can be continued once the merge is committed */
-export interface PendingPromotion { envId: string; branch: string; remaining: { id: string; ref: string | null; commits: string[] }[]; options: PrepareOptions }
+export interface PendingPromotion { envId: string; branch: string; remaining: PromoteInput[]; options: PrepareOptions }
 
 export interface ReleaseAnalysis {
   config: EnvConfig

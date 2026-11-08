@@ -1,7 +1,32 @@
 # Organizations — design proposal (revision 2)
 
-Status: phases 1 and 2 implemented (see section 12); phases 3–4 are proposals. Revision 2
+Status: phases 1, 2 and 3 implemented (see section 12); phase 4 is a proposal. Revision 2
 after a critical second pass; the changes from revision 1 are listed at the end (section 14).
+
+Phase 3 notes (what shipped, and where it differs from the proposal):
+- Releases are created from the Ready tab (*Promote selected…*). The dialog runs the gates
+  first; blocking gates need the target branch name typed as confirmation and the override
+  is recorded on the release. The per-repository Release view keeps its own, record-less
+  promotion for single repositories.
+- Release records live in `orgs/<id>/releases.json`. Per repository they hold the requested
+  inputs, merged / skipped items, a pause (conflict + remaining items), the pull request (or
+  the compare page opened in the browser), whether the branch landed in the environment, an
+  error (e.g. a dirty working tree, retried with *Retry*) and a drop reason.
+- Gates: tracker state (allowed states per environment), partly promoted, dev-based, frozen,
+  previous environment; each off / warn / block, stored on the template environment
+  (`Environment.gates`); defaults as in section 13.7. Freezes live on the organization
+  (`freezes`), with an optional until-day; *Lift* in the Organization header.
+- Hosting: GitHub through the gh CLI (its login, or an org-specific token passed as GH_TOKEN),
+  REST with the token when gh is missing. Pull-request state, checks, review decision,
+  mergeability, creation with reviewers / labels / draft / body template. GitLab and
+  Bitbucket keep the compare-page links. Linking rules 4–5 (attachments and PR titles) are
+  not applied automatically; the data they need (issue attachment URLs, PR lists) is fetched
+  and shown (Ready tab PR column), and *Link branch…* covers the rest.
+- Tracker events: state on PR opened (`trackerStateOnPr`), state on Finish (`trackerState`),
+  attach the PR to the Linear issue (off by default).
+- Deployed-version probes are stored with the repository pipeline override (`probes`), read on
+  the Overview and on release cards; the value must be a commit, tag or branch known to the
+  clone. Deploy order is a list of repository identities on the organization.
 
 Phase 2 notes (what shipped, and where it differs from the proposal):
 - Per-repository state now lives in `repos/<slug>-<hash>/` keyed by the normalised remote URL
@@ -440,7 +465,7 @@ worth the most test coverage because mistakes there are silent.
 - Tests: index merging, warnings, multi-repository start work.
 - Done when: "is CYB4-2428 fully on stage?" is answered by one row.
 
-### Phase 3 — Releases
+### Phase 3 — Releases (implemented)
 - Cross-repository Promote with pre-flight checks (gates), freeze, deploy order; release
   records; Releases tab with Resume / drop / Finish (sync + tracker states) / Notes.
 - Hosting integration (GitHub via `gh`, token fallback): PR state, checks, review decision,

@@ -14,7 +14,7 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
-    "test:backend": "esbuild test/backend-entry.ts --bundle --platform=node --format=cjs --alias:@shared=./src/shared --outfile=out/test/backend.cjs --log-level=error && node test/git-backend.test.cjs && node test/release.test.cjs && node test/organizations.test.cjs && node test/workindex.test.cjs",
+    "test:backend": "esbuild test/backend-entry.ts --bundle --platform=node --format=cjs --alias:@shared=./src/shared --outfile=out/test/backend.cjs --log-level=error && node test/git-backend.test.cjs && node test/release.test.cjs && node test/organizations.test.cjs && node test/workindex.test.cjs && node test/releases.test.cjs",
     "build:renderer": "ng build"
   },
   "dependencies": {

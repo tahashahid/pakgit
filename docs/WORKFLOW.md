@@ -140,6 +140,14 @@ Organization window (Cmd/Ctrl+5) puts every repository of the organization in on
 - **Ready** is the release table across repositories. An issue whose parts sit on different
   environments is marked *partly promoted*: promote the lagging repository before releasing.
   *Promote selected…* opens that repository's Release view with the items ticked.
+- *Promote selected…* in Ready creates one **release** across the selected repositories: the
+  pre-flight checks run first (Linear state, partly promoted, cut from dev, freeze, previous
+  environment), then one branch name is created in each repository in deploy order, the
+  items are merged, and one pull request per repository is opened on GitHub. A conflict
+  pauses only that repository: resolve it there, commit, and press *Resume* on the release.
+- **Releases** follows each release from created to finished: pull-request state, checks and
+  review per repository, whether the branch landed, and *Finish* once everything is merged
+  (back-merges the environment into the earlier ones and moves the Linear issues).
 - Quick open (Cmd/Ctrl+K) jumps to any repository, branch, issue or release branch.
 
 ## Rules that keep conflicts rare

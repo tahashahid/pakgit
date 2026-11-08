@@ -1,9 +1,23 @@
 import { Component, computed, effect, inject, signal } from '@angular/core'
 import { Store } from '../store.service'
 import { PipelineEditor } from '../ui/pipeline-editor'
-import type { EnvConfig, OrgTrackerStatus, Organization, TrackerConfig } from '@shared/types'
+import type { EnvConfig, Environment, GateConfig, GateId, GateMode, HostingConfig, HostingStatus, OrgTrackerStatus, Organization, RepoEntry, TrackerConfig } from '@shared/types'
 
-type Section = 'general' | 'repositories' | 'pipeline' | 'conventions' | 'integrations' | 'sharing'
+type Section = 'general' | 'repositories' | 'pipeline' | 'gates' | 'conventions' | 'integrations' | 'sharing'
+const GATES: { id: GateId; label: string; hint: string }[] = [
+  { id: 'tracker-state', label: 'Tracker state', hint: 'every item is in one of the allowed Linear states' },
+  { id: 'partly-promoted', label: 'Not partly promoted', hint: 'no issue sits on different environments across repositories' },
+  { id: 'dev-based', label: 'Not cut from dev/stage', hint: 'no branch carries other unreleased work' },
+  { id: 'frozen', label: 'Environment not frozen', hint: 'the freeze below is not active' },
+  { id: 'previous-env', label: 'Already in the previous environment', hint: 'every item is waiting for this environment' }
+]
+/** Defaults mirror the engine: the last environment blocks on tracker state (Ready To Deploy) and partly promoted. */
+function defaultGate(id: GateId, isLast: boolean): GateConfig {
+  if (id === 'tracker-state') return { id, mode: isLast ? 'block' : 'warn', states: isLast ? ['Ready To Deploy'] : [] }
+  if (id === 'partly-promoted') return { id, mode: isLast ? 'block' : 'warn' }
+  if (id === 'dev-based') return { id, mode: 'warn' }
+  return { id, mode: 'block' }
+}
 const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2', '#dc2626', '#4b5563']
 
 @Component({
@@ -39,6 +53,13 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                       <button type="button" class="btn small danger" title="Remove from the list" (click)="removeRepo(r.path)">✕</button>
                     }
                   </div>
+                  <div class="group-header" style="padding-left:0">Deploy order<span class="count">releases list and merge repositories in this order</span></div>
+                  <div class="rebase-list" style="max-height:30vh">
+                    @for (r of ordered(); track r.path; let i = $index) {
+                      <div class="rebase-row"><span class="mono muted" style="font-size:11px;width:18px">{{ i + 1 }}.</span><span class="subject">{{ r.name }}@if (r.group) { <span class="muted"> · {{ r.group }}</span> }</span>
+                        <button type="button" class="btn small" (click)="moveOrder(i, -1)" [disabled]="i === 0" title="Earlier">↑</button><button type="button" class="btn small" (click)="moveOrder(i, 1)" [disabled]="i === ordered().length - 1" title="Later">↓</button></div>
+                    }
+                  </div>
                   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                     <button type="button" class="btn small" (click)="store.addRepo()">+ Open repository…</button>
                     <input [value]="newGroup()" placeholder="New group name" (input)="newGroup.set($any($event.target).value)" style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg1);color:var(--fg1)" />
@@ -56,6 +77,29 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                     <pg-pipeline-editor [value]="o.pipeline" [detectLabel]="store.repo() ? 'Detect from ' + store.repo()!.name : ''" (valueChange)="set({ pipeline: $event })" (detect)="detectPipeline()" />
                     <small class="hint">Each repository inherits this and may override branch names, promotion strategies or leave environments out (repository ▸ Release ▸ Configure).</small>
                   } @else { <small class="hint">Without a template every repository detects or defines its own pipeline.</small> }
+                }
+                @case ('gates') {
+                  @if (o.pipeline; as p) {
+                    <p class="modal-message">Pre-flight checks run before a release is created from the Ready tab. Blocking checks can be overridden by typing the branch name; the override is recorded on the release. A freeze blocks promotions into an environment until it is lifted (or its date passes).</p>
+                    @for (e of p.environments; track e.id + $index; let i = $index; let last = $last) {
+                      <div class="gate-env">
+                        <div class="gate-env-title"><b>{{ e.name || e.branch }}</b><span class="mono muted" style="margin-left:8px">{{ e.branch }}</span>@if (last) { <span class="muted"> · last environment</span> }</div>
+                        <div class="gate-grid">
+                          @for (g of gateDefs; track g.id) {
+                            <span [title]="g.hint">{{ g.label }}</span>
+                            <select (change)="setGate(i, g.id, { mode: $any($event.target).value })"><option value="off" [selected]="gate(e, g.id, last).mode === 'off'">off</option><option value="warn" [selected]="gate(e, g.id, last).mode === 'warn'">warn</option><option value="block" [selected]="gate(e, g.id, last).mode === 'block'">block</option></select>
+                            @if (g.id === 'tracker-state') { <input [value]="(gate(e, g.id, last).states ?? []).join(', ')" placeholder="allowed states, e.g. Ready To Deploy (empty = any)" (input)="setGate(i, g.id, { states: split($any($event.target).value) })" /> } @else { <span class="muted" style="font-size:11px">{{ g.hint }}</span> }
+                          }
+                          <span title="Set on the Linear issues when a pull request into this environment opens">Linear state when the PR opens</span>
+                          <span></span>
+                          <input [value]="e.trackerStateOnPr ?? ''" placeholder="e.g. In Review (empty = no change)" (input)="setEnv(i, { trackerStateOnPr: $any($event.target).value })" />
+                          <span title="Promotions into this environment are blocked while frozen">Freeze</span>
+                          <input type="date" [value]="o.freezes[e.id]?.until ?? ''" (change)="setFreeze(e.id, { until: $any($event.target).value || null })" title="Lifts automatically after this day; empty = until lifted by hand" />
+                          <input [value]="o.freezes[e.id]?.note ?? ''" placeholder="empty = not frozen; e.g. UAT until Friday" (input)="setFreeze(e.id, { note: $any($event.target).value })" />
+                        </div>
+                      </div>
+                    }
+                  } @else { <p class="modal-message">Gates and freezes are part of the pipeline template. Set one under Pipeline; until then the defaults apply (the last environment blocks on tracker state "Ready To Deploy" and on partly promoted issues, everything else warns).</p> }
                 }
                 @case ('conventions') {
                   <div class="settings-grid">
@@ -87,8 +131,26 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                       <label class="field"><span>State when starting work on an issue</span><input [value]="o.tracker.stateOnStart" placeholder="In Progress" (input)="setTracker({ stateOnStart: $any($event.target).value })" /><small class="hint">States on arrival in each environment are part of the pipeline.</small></label>
                     }
                   </div>
-                  <h3 style="margin:6px 0 0;font-size:13px">Hosting, notifications, CI</h3>
-                  <small class="hint">Pull-request links already work from the remote URL (GitHub, GitLab, Bitbucket). PR state, Slack and CI integrations come in later phases.</small>
+                  <h3 style="margin:6px 0 0;font-size:13px">Hosting (pull requests)</h3>
+                  <div class="settings-grid">
+                    <label class="field"><span>Provider</span>
+                      <select (change)="setHosting({ provider: $any($event.target).value })"><option value="auto" [selected]="o.hosting.provider === 'auto'">Automatic (GitHub when available)</option><option value="github" [selected]="o.hosting.provider === 'github'">GitHub</option><option value="none" [selected]="o.hosting.provider === 'none'">None (pull-request links only)</option></select>
+                      <small class="hint">GitHub through the gh CLI when it is installed and signed in, else through a personal access token. GitLab and Bitbucket get links from the remote URL.</small></label>
+                    <div class="field"><span>Connection</span>
+                      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                        @if (hs()?.available) { <span class="chip ok">GitHub ✓{{ hs()!.account ? ' ' + hs()!.account : '' }} via {{ hs()!.via === 'gh' ? 'gh' : 'token' }}</span> }
+                        @else if (o.hosting.provider !== 'none') { <span class="chip bad" [title]="hs()?.error ?? ''">{{ hs()?.error ?? 'not connected' }}</span> }
+                        <button type="button" class="btn small ghost" (click)="refreshHosting()">Check</button>
+                      </div>
+                      <small class="hint">The gh path can be set in Settings when it is not found.</small></div>
+                    <label class="field"><span>Personal access token (optional)</span><input type="password" [value]="ghToken()" placeholder="ghp_… (leave empty to keep the stored one, or to use gh)" (input)="ghToken.set($any($event.target).value)" /><small class="hint">Needs the repo scope. Stored encrypted, yours only, never exported.</small></label>
+                    <label class="field"><span>Reviewers for release pull requests</span><input [value]="o.hosting.reviewers.join(', ')" placeholder="github logins, comma-separated" (input)="setHosting({ reviewers: split($any($event.target).value) })" /></label>
+                    <label class="field"><span>Labels</span><input [value]="o.hosting.labels.join(', ')" placeholder="e.g. release" (input)="setHosting({ labels: split($any($event.target).value) })" /></label>
+                    <label class="field field-check"><input type="checkbox" [checked]="o.hosting.draft" (change)="setHosting({ draft: $any($event.target).checked })" /><span>Open release pull requests as drafts</span></label>
+                    <label class="field field-check"><input type="checkbox" [checked]="o.hosting.attachPrsToIssues" (change)="setHosting({ attachPrsToIssues: $any($event.target).checked })" /><span>Attach pull requests to the Linear issues</span></label>
+                    <label class="field" style="grid-column:1/-1"><span>Pull request body template</span><textarea rows="4" [value]="o.hosting.prTemplate" placeholder="empty = the default (items with their Linear links). Tokens: {{ '{' }}name{{ '}' }} {{ '{' }}env{{ '}' }} {{ '{' }}items{{ '}' }} {{ '{' }}repo{{ '}' }}" (input)="setHosting({ prTemplate: $any($event.target).value })"></textarea></label>
+                  </div>
+                  <small class="hint">Slack notifications and CI beyond pull-request checks come in a later phase.</small>
                 }
                 @case ('sharing') {
                   <p class="modal-message">Export writes one file with this organization's repositories (by remote URL), groups, pipeline, conventions and tracker configuration, and no secrets or local paths. A teammate imports it and gets the same setup, with Clone buttons for repositories they do not have.</p>
@@ -115,9 +177,12 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
 export class OrgConfigDialog {
   readonly store = inject(Store)
   readonly sections: { id: Section; label: string }[] = [
-    { id: 'general', label: 'General' }, { id: 'repositories', label: 'Repositories & groups' }, { id: 'pipeline', label: 'Pipeline' },
+    { id: 'general', label: 'General' }, { id: 'repositories', label: 'Repositories & groups' }, { id: 'pipeline', label: 'Pipeline' }, { id: 'gates', label: 'Gates & freeze' },
     { id: 'conventions', label: 'Conventions' }, { id: 'integrations', label: 'Integrations' }, { id: 'sharing', label: 'Sharing' }
   ]
+  readonly gateDefs = GATES
+  readonly hs = signal<HostingStatus | null>(null)
+  readonly ghToken = signal('')
   readonly colors = COLORS
   readonly section = signal<Section>('general')
   readonly draft = signal<Organization | null>(null)
@@ -133,14 +198,47 @@ export class OrgConfigDialog {
       const s = this.store.showOrgConfig()
       if (!s) { this.draft.set(null); return }
       const o = this.store.org(); if (!o) return
-      this.draft.set(structuredClone(o)); this.section.set((s as Section) in { general: 1, repositories: 1, pipeline: 1, conventions: 1, integrations: 1, sharing: 1 } ? (s as Section) : 'general')
-      this.error.set(''); this.apiKey.set('')
-      void this.refreshTracker(o.id)
+      this.draft.set(structuredClone(o)); this.section.set((s as Section) in { general: 1, repositories: 1, pipeline: 1, gates: 1, conventions: 1, integrations: 1, sharing: 1 } ? (s as Section) : 'general')
+      this.error.set(''); this.apiKey.set(''); this.ghToken.set('')
+      void this.refreshTracker(o.id); void this.refreshHosting()
     })
     this.store.api.trackerRedirectUrl().then((u) => this.redirect.set(u)).catch(() => undefined)
   }
   private async refreshTracker(id: string): Promise<void> { try { this.ts.set(await this.store.api.orgTrackerStatus(id)) } catch { this.ts.set(null) } }
   set(patch: Partial<Organization>): void { this.draft.update((d) => (d ? { ...d, ...patch } : d)) }
+  setHosting(patch: Partial<HostingConfig>): void { this.draft.update((d) => (d ? { ...d, hosting: { ...d.hosting, ...patch } } : d)) }
+  split(v: string): string[] { return v.split(',').map((x) => x.trim()).filter(Boolean) }
+  async refreshHosting(): Promise<void> { try { this.hs.set(await this.store.api.orgHostingStatus(this.store.activeOrgId())) } catch { this.hs.set(null) } }
+  // ---- gates & freeze (part of the pipeline template and the organization)
+  gate(e: Environment, id: GateId, isLast: boolean): GateConfig { return e.gates?.find((g) => g.id === id) ?? defaultGate(id, isLast) }
+  setGate(i: number, id: GateId, patch: Partial<GateConfig>): void {
+    this.draft.update((d) => {
+      if (!d?.pipeline) return d
+      const envs = d.pipeline.environments.map((e, k) => {
+        if (k !== i) return e
+        const isLast = k === d.pipeline!.environments.length - 1
+        const gates = GATES.map((g) => e.gates?.find((x) => x.id === g.id) ?? defaultGate(g.id, isLast)).map((g) => (g.id === id ? { ...g, ...patch } : g))
+        return { ...e, gates }
+      })
+      return { ...d, pipeline: { ...d.pipeline, environments: envs } }
+    })
+  }
+  setEnv(i: number, patch: Partial<Environment>): void { this.draft.update((d) => (d?.pipeline ? { ...d, pipeline: { ...d.pipeline, environments: d.pipeline.environments.map((e, k) => (k === i ? { ...e, ...patch } : e)) } } : d)) }
+  setFreeze(envId: string, patch: { note?: string; until?: string | null }): void {
+    this.draft.update((d) => { if (!d) return d; const cur = d.freezes[envId] ?? { note: '', until: null }; const next = { ...cur, ...patch }; const freezes = { ...d.freezes }; if (next.note.trim() || next.until) freezes[envId] = next; else delete freezes[envId]; return { ...d, freezes } })
+  }
+  // ---- deploy order (identity = remote, else path)
+  readonly ordered = computed<RepoEntry[]>(() => {
+    const d = this.draft(); const repos = this.store.repos(); if (!d) return repos
+    const key = (r: RepoEntry): string => r.remote ?? r.path
+    const rank = new Map(d.deployOrder.map((k, i) => [k, i]))
+    return [...repos].sort((a, b) => (rank.get(key(a)) ?? 1e9) - (rank.get(key(b)) ?? 1e9) || Number(!a.group) - Number(!b.group) || (a.group ?? '').localeCompare(b.group ?? '') || a.name.localeCompare(b.name))
+  })
+  moveOrder(i: number, dir: -1 | 1): void {
+    const list = [...this.ordered()]; const j = i + dir; if (j < 0 || j >= list.length) return
+    ;[list[i], list[j]] = [list[j], list[i]]
+    this.set({ deployOrder: list.map((r) => r.remote ?? r.path) })
+  }
   setConv(patch: Partial<Organization['conventions']>): void { this.draft.update((d) => (d ? { ...d, conventions: { ...d.conventions, ...patch } } : d)) }
   setTracker(patch: Partial<TrackerConfig>): void { this.draft.update((d) => (d ? { ...d, tracker: { ...d.tracker, ...patch } } : d)) }
   close(): void { this.store.showOrgConfig.set(null) }
@@ -149,12 +247,13 @@ export class OrgConfigDialog {
     const { id, createdAt, ...patch } = d
     const saved = await this.store.api.orgUpdate(id, patch)
     if (this.apiKey().trim()) { await this.store.api.orgTrackerSetSecrets(id, { linearApiKey: this.apiKey().trim() }); this.apiKey.set('') }
+    if (this.ghToken().trim()) { await this.store.api.orgHostingSetToken(id, this.ghToken().trim()); this.ghToken.set('') }
     this.store.org.set(saved)
     return saved
   }
   async save(): Promise<void> {
     this.busy.set(true); this.error.set('')
-    try { await this.persist(); await this.store.reloadOrg(); await this.store.refreshTracker(); this.store.release.set(null); this.store.overview.set(null); this.store.toast('success', 'Organization saved'); this.close() }
+    try { await this.persist(); await this.store.reloadOrg(); await this.store.refreshTracker(); this.store.hostingStatus.set(null); void this.store.refreshHosting(); this.store.release.set(null); this.store.overview.set(null); this.store.index.set(null); this.store.toast('success', 'Organization saved'); this.close() }
     catch (e) { this.error.set(e instanceof Error ? e.message : String(e)) } finally { this.busy.set(false) }
   }
   // repositories & groups act immediately (they are not part of the draft)

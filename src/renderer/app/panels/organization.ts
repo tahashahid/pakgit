@@ -4,11 +4,14 @@ import { Icon } from '../ui/icon'
 import { OrgOverview } from './org-overview'
 import { OrgWork } from './org-work'
 import { OrgReady } from './org-ready'
+import { OrgReleases } from './org-releases'
+import { ReleaseDialog } from './release-dialog'
+import type { Freeze, ReleaseRecord } from '@shared/types'
 
 /** Organization perspective: header with the tabs (Overview · Work · Ready) and the group chips. */
 @Component({
   selector: 'pg-organization',
-  imports: [Icon, OrgOverview, OrgWork, OrgReady],
+  imports: [Icon, OrgOverview, OrgWork, OrgReady, OrgReleases, ReleaseDialog],
   template: `
     <div class="org-view">
       <div class="org-header">
@@ -17,6 +20,7 @@ import { OrgReady } from './org-ready'
           <button class="btn small" [class.active]="store.orgTab() === 'overview'" (click)="store.orgTab.set('overview')">Overview</button>
           <button class="btn small" [class.active]="store.orgTab() === 'work'" (click)="store.orgTab.set('work')" title="Issues from the tracker across every repository">Work</button>
           <button class="btn small" [class.active]="store.orgTab() === 'ready'" (click)="store.orgTab.set('ready')" title="Everything waiting for an environment, in one table">Ready @if (readyTotal() !== null) { <span class="badge">{{ readyTotal() }}</span> }</button>
+          <button class="btn small" [class.active]="store.orgTab() === 'releases'" (click)="store.orgTab.set('releases')" title="Named releases across repositories: branches, pull requests, finish">Releases @if (store.inProgressReleases()) { <span class="badge">{{ store.inProgressReleases() }}</span> }</button>
         </div>
         @if (store.groups().length) {
           <div class="chips">
@@ -30,29 +34,56 @@ import { OrgReady } from './org-ready'
           @else if (ts.error) { <span class="chip bad" [title]="ts.error">Linear: error</span> }
           @else if (ts.provider !== 'none') { <button class="btn small ghost" (click)="store.showOrgConfig.set('integrations')">Linear: sign in</button> }
         }
+        @if (store.hostingStatus(); as hs) {
+          @if (hs.available) { <span class="chip ok" [title]="'Pull requests through ' + (hs.via === 'gh' ? 'the gh CLI' : 'a token') + (hs.account ? ' as ' + hs.account : '')">GitHub ✓</span> }
+          @else if (hs.provider !== 'none') { <button class="btn small ghost" (click)="store.showOrgConfig.set('integrations')" [title]="hs.error ?? ''">GitHub: not connected</button> }
+        }
         @if (store.indexLoading() || store.overviewLoading()) { <span class="busy" title="Analysing repositories"><span class="spinner"></span></span> }
         <span style="flex:1"></span>
         <button class="btn small" (click)="fetchAll()" [disabled]="store.busy() !== null" title="Fetch every repository, then re-analyse"><pg-icon name="fetch" [size]="14" />Fetch all</button>
         <button class="btn small" (click)="refresh()" [disabled]="store.indexLoading()" title="Re-analyse every repository (bypasses the cache) and reload tracker data"><pg-icon name="refresh" [size]="14" /></button>
         <button class="btn small" (click)="store.showQuickOpen.set(true)" title="Quick open (Cmd/Ctrl+K)"><pg-icon name="search" [size]="14" /></button>
-        <button class="btn small" (click)="store.showOrgConfig.set('general')"><pg-icon name="gear" [size]="14" />Configure…</button>
-        <button class="btn small ghost" (click)="store.showNewOrg.set(true)">New organization…</button>
+        <button class="btn small" (click)="store.showOrgConfig.set('general')" title="Organization settings; New organization… is in the organization switcher"><pg-icon name="gear" [size]="14" />Configure…</button>
       </div>
+      @for (f of freezes(); track f.envId) {
+        <div class="state-banner freeze"><span>❄ {{ f.envName }} is frozen{{ f.note ? ': ' + f.note : '' }}{{ f.until ? ' (until ' + f.until + ')' : '' }}. Promotions into it are blocked by the freeze gate.</span><span style="flex:1"></span><button class="btn small" (click)="lift(f.envId)">Lift</button></div>
+      }
       @switch (store.orgTab()) {
         @case ('work') { <pg-org-work /> }
         @case ('ready') { <pg-org-ready /> }
+        @case ('releases') { <pg-org-releases /> }
         @default { <pg-org-overview /> }
       }
+      @if (store.releaseDraft(); as sel) { <pg-release-dialog [selection]="sel" [initialEnv]="store.readyTab()" (closed)="store.releaseDraft.set(null)" (created)="created($event)" /> }
     </div>`
 })
 export class OrganizationView {
   readonly store = inject(Store)
   readonly readyTotal = computed(() => { const ov = this.store.overview(); return ov ? ov.totals.ready.reduce((n, r) => n + r.count, 0) : null })
+  /** active freezes with the environment name from the template or the index */
+  readonly freezes = computed(() => {
+    const org = this.store.org(); if (!org) return []
+    const envs = this.store.index()?.environments ?? org.pipeline?.environments ?? []
+    const active = (f: Freeze): boolean => !f.until || Date.now() <= new Date(f.until + 'T23:59:59').getTime()
+    return Object.entries(org.freezes ?? {}).filter(([, f]) => active(f)).map(([envId, f]) => ({ envId, envName: envs.find((e) => e.id === envId)?.name || envId, note: f.note, until: f.until }))
+  })
   constructor() {
     const s = this.store
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.index() && !s.indexLoading() && !s.indexError()) void s.loadIndex() })
     effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.overview() && !s.overviewLoading() && !s.overviewError()) void s.loadOverview() })
+    effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.hostingStatus()) void s.refreshHosting() })
+    effect(() => { if (s.perspective() === 'organization' && s.workspace() && !s.releases().length && !s.releasesLoading()) void s.loadReleases() })
     void s.refreshTracker()
+  }
+  async lift(envId: string): Promise<void> {
+    try { this.store.org.set(await this.store.api.orgSetFreeze(this.store.activeOrgId(), envId, null)); this.store.toast('success', 'Freeze lifted') } catch (e) { this.store.toast('error', e instanceof Error ? e.message : String(e)) }
+  }
+  created(rec: ReleaseRecord): void {
+    this.store.releaseDraft.set(null)
+    const paused = rec.repos.filter((r) => r.paused).length, errors = rec.repos.filter((r) => r.error).length
+    this.store.toast(paused || errors ? 'error' : 'success', `${rec.name}: ${rec.repos.length} repositor${rec.repos.length === 1 ? 'y' : 'ies'}${paused ? `, ${paused} paused on a conflict` : ''}${errors ? `, ${errors} with errors` : ''}`)
+    this.store.releaseFocus.set(rec.id); this.store.orgTab.set('releases')
+    void this.store.afterRelease()
   }
   async fetchAll(): Promise<void> {
     const repos = this.store.repos()

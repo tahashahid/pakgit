@@ -24,6 +24,8 @@ export interface TrackerProvider {
   keyPrefixes(): Promise<string[]>
   /** drop cached issues (all when no keys are given) so the next getIssues re-fetches them */
   invalidate?(keys?: string[]): void
+  /** attach a pull request to the issue (optional capability) */
+  attachPullRequest?(key: string, url: string, title?: string): Promise<void>
 }
 
 export class NoTracker implements TrackerProvider {

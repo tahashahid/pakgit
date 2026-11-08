@@ -19,6 +19,8 @@ export function configureTrackerFor(orgId: string, s: TrackerSettings | undefine
   return p
 }
 export function setActiveTrackerOrg(orgId: string): void { activeOrg = orgId }
+/** Replace the provider of an organization (tests inject a fake). */
+export function setTrackerFor(orgId: string, p: TrackerProvider): void { instances.set(orgId, p) }
 export function trackerFor(orgId: string): TrackerProvider { return instances.get(orgId) ?? none }
 export function tracker(): TrackerProvider { return trackerFor(activeOrg) }
 /** kept for callers that configure a single tracker (tests) */

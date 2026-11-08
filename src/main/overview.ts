@@ -2,6 +2,8 @@ import { existsSync, statSync } from 'fs'
 import { join } from 'path'
 import * as git from './git'
 import * as orgs from './organizations'
+import * as release from './release'
+import { probeRepo } from './probes'
 import { buildIndex, sortedRepos, type IndexOptions } from './workindex'
 import type { OrgOverview, ReleaseAnalysis, RepoEntry, RepoOverviewCard, WorkIndex } from '@shared/types'
 
@@ -40,6 +42,8 @@ async function card(repo: RepoEntry, a: ReleaseAnalysis | undefined, index: Work
       const merged = (await git.run(['merge-base', '--is-ancestor', b.ref, lastRef], { cwd: repo.path, allowFail: true })).code === 0
       if (!merged) c.staleReleaseBranches.push(b.name)
     }
+    // deployed-version probes (only environments that have one)
+    try { const p = await release.repoPipeline(repo.path); if (p.override.probes && Object.keys(p.override.probes).length) c.deployed = await probeRepo(repo.path, a.config, p.override.probes) } catch { /* no probes */ }
   } catch (e) { c.error = e instanceof Error ? e.message : String(e) }
   return c
 }
@@ -56,9 +60,10 @@ export async function overview(orgId: string, opts: IndexOptions = {}): Promise<
     cur.count += e.ready; ready.set(e.id, cur)
   }
   const partlyPromoted = index.items.filter((it) => it.partlyPromoted).length
-  const warnings = cards.reduce((n, c) => n + (c.error ? 1 : 0) + (c.drift ? 1 : 0) + ((c.devBased ?? 0) > 0 ? 1 : 0) + ((c.staleReleaseBranches?.length ?? 0) > 0 ? 1 : 0) + ((c.environments ?? []).some((e) => e.missing) ? 1 : 0), 0) + (partlyPromoted > 0 ? 1 : 0)
+  const warnings = cards.reduce((n, c) => n + (c.error ? 1 : 0) + (c.drift ? 1 : 0) + ((c.devBased ?? 0) > 0 ? 1 : 0) + ((c.staleReleaseBranches?.length ?? 0) > 0 ? 1 : 0) + ((c.environments ?? []).some((e) => e.missing) ? 1 : 0) + ((c.deployed ?? []).some((d) => d.status === 'behind' || d.status === 'unknown') ? 1 : 0), 0) + (partlyPromoted > 0 ? 1 : 0)
   return {
     org: { id: org.id, name: org.name, color: org.color, repoCount: repos.length },
+    freezes: orgs.activeFreezes(org),
     repos: cards, totals: { ready: [...ready.values()], unreleased: cards.reduce((n, c) => n + (c.unreleased ?? 0), 0), warnings, partlyPromoted }, generatedAt: Date.now()
   }
 }

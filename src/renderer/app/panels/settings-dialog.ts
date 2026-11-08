@@ -11,6 +11,7 @@ import type { Settings } from '@shared/types'
           <h2>Settings</h2>
           <div class="settings-grid">
             <label class="field"><span>Git executable</span><input [value]="s.gitPath" placeholder="git" (input)="upd({ gitPath: $any($event.target).value })" /><small class="hint">Leave empty to auto-detect.</small></label>
+            <label class="field"><span>GitHub CLI executable</span><input [value]="s.ghPath" placeholder="gh" (input)="upd({ ghPath: $any($event.target).value })" /><small class="hint">Used for pull requests. Leave empty to auto-detect (PATH, Homebrew, Program Files).</small></label>
             <label class="field"><span>Default pull strategy</span>
               <select (change)="upd({ pullMode: $any($event.target).value })"><option value="merge" [selected]="s.pullMode === 'merge'">merge</option><option value="rebase" [selected]="s.pullMode === 'rebase'">rebase</option><option value="ff-only" [selected]="s.pullMode === 'ff-only'">fast-forward only</option></select><small class="hint">Used when you pull from the toolbar.</small></label>
             <label class="field"><span>Background fetch (minutes)</span><input type="number" min="0" [value]="s.autoFetchMinutes" (input)="upd({ autoFetchMinutes: num($event, 0) })" /><small class="hint">0 turns it off.</small></label>
