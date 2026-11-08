@@ -33,3 +33,7 @@ linux:
   target: [AppImage, deb, rpm]
   category: Development
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
+  # deb and rpm need a maintainer; the GitHub no-reply address keeps the real e-mail out of the packages
+  maintainer: Taha Shahid <tahashahid@users.noreply.github.com>
+  synopsis: Cross-platform Git client with organization-wide release planning
+  description: PakGit is a free Git client for Windows, macOS and Linux with release planning across repositories, Linear and Jira integration and GitHub pull requests.
