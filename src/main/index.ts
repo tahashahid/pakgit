@@ -5,83 +5,114 @@ import { spawn } from 'child_process'
 import chokidar, { FSWatcher } from 'chokidar'
 import * as git from './git'
 import * as release from './release'
-import { configureTracker, tracker } from './tracker'
+import * as orgs from './organizations'
+import { overview as orgOverview } from './overview'
+import * as workindex from './workindex'
+import * as releases from './releases'
+import * as configrepo from './configrepo'
+import * as cleanup from './cleanup'
+import { postSlack, slackNotifier } from './notify'
+import { probeRepo } from './probes'
+import { configureHostingFor, hostingFor } from './hosting'
+import { configureTrackerFor, setActiveTrackerOrg, tracker, trackerFor } from './tracker'
 import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
-import type { BranchTarget, CommitOptions, DiffRequest, FileArea, PrepareOptions, RepoEntry } from '@shared/types'
+import type { BranchTarget, CommitOptions, CreateReleaseRequest, DiffRequest, FileArea, Freeze, IssueQuery, OrgExport, Organization, PrepareOptions, ProbeResult, ReleaseSelection, RepoEntry, RepoPipelineOverride, StartWorkRequest, TrackerAuth, TrackerConfig, TrackerSettings } from '@shared/types'
+import type { ReleaseEvent } from './notify'
 
-// ---------- repository registry ----------
+// ---------- repository registry (per organization, see organizations.ts) ----------
 
-const storeFile = () => join(app.getPath('userData'), 'repositories.json')
-function loadRepos(): RepoEntry[] {
-  try { return JSON.parse(readFileSync(storeFile(), 'utf8')) } catch { return [] }
+const loadRepos = (): RepoEntry[] => orgs.orgRepos(orgs.activeOrgId())
+async function remoteIdentity(path: string): Promise<string | null> {
+  try { const r = await git.refs(path); const o = r.remotes.find((x) => x.name === 'origin') ?? r.remotes[0]; return orgs.normalizeRemote(o?.fetchUrl) } catch { return null }
 }
-function saveRepos(list: RepoEntry[]): void {
-  mkdirSync(dirname(storeFile()), { recursive: true })
-  writeFileSync(storeFile(), JSON.stringify(list, null, 2))
-}
-const groupsFile = () => join(app.getPath('userData'), 'groups.json')
-function loadGroups(): string[] {
-  try { return JSON.parse(readFileSync(groupsFile(), 'utf8')) } catch { return [] }
-}
-function saveGroups(list: string[]): void {
-  mkdirSync(dirname(groupsFile()), { recursive: true })
-  writeFileSync(groupsFile(), JSON.stringify(list, null, 2))
-}
-async function registerRepo(path: string): Promise<RepoEntry> {
+async function registerRepo(path: string, orgId?: string): Promise<RepoEntry> {
   const top = await git.topLevel(path)
-  const existing = loadRepos().find((r) => r.path === top)
-  const list = loadRepos().filter((r) => r.path !== top)
-  const entry: RepoEntry = { path: top, name: basename(top), lastOpened: Date.now(), group: existing?.group ?? null }
-  list.unshift(entry)
-  saveRepos(list)
+  const existing = orgs.findRepo(top)
+  const entry = orgs.upsertRepo({ path: top, name: basename(top), lastOpened: Date.now(), group: existing?.group ?? null, remote: existing?.remote ?? (await remoteIdentity(top)) }, orgId ?? existing?.org ?? orgs.activeOrgId())
   return entry
 }
+/** Fill remote identities for repositories migrated from the flat layout (once, in the background). */
+async function fillRemotes(): Promise<void> {
+  for (const r of orgs.allRepos()) if (r.remote === undefined && existsSync(r.path)) orgs.setRepoRemote(r.path, await remoteIdentity(r.path))
+}
 
-// ---------- settings ----------
+// ---------- settings (app-wide) and per-person tracker auth (per organization, encrypted) ----------
 
 import type { Settings } from '@shared/types'
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
-const defaultSettings: Settings = {
-  gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true,
-  tracker: { provider: 'none', authMethod: 'oauth', linearApiKey: '', linearClientId: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0, stateOnStart: 'In Progress' }
-}
+const defaultSettings: Settings = { gitPath: '', pullMode: 'merge', autoFetchMinutes: 0, logLimit: 400, confirmDiscard: true, ghPath: '' }
+const emptyAuth = (): TrackerAuth => ({ linearApiKey: '', linearClientSecret: '', linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0, githubToken: '', jiraEmail: '', jiraToken: '', slackWebhook: '' })
 // Secrets are encrypted at rest with the OS keychain when available (Electron safeStorage).
-const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken'] as const
+const SECRET_FIELDS = ['linearApiKey', 'linearClientSecret', 'linearAccessToken', 'linearRefreshToken', 'githubToken', 'jiraToken', 'slackWebhook'] as const
 const enc = (v: string): string => (v && safeStorage.isEncryptionAvailable() ? 'enc:' + safeStorage.encryptString(v).toString('base64') : v)
 const dec = (v: string): string => { try { return v?.startsWith('enc:') && safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(v.slice(4), 'base64')) : v ?? '' } catch { return '' } }
-function loadSettings(): Settings {
+interface SettingsFile extends Settings { auth?: Record<string, TrackerAuth>; tracker?: Record<string, unknown> }
+function readSettingsFile(): SettingsFile {
   try {
-    const s = JSON.parse(readFileSync(settingsFile(), 'utf8'))
-    const tracker = { ...defaultSettings.tracker, ...(s.tracker ?? {}) } as Settings['tracker']
-    for (const f of SECRET_FIELDS) tracker[f] = dec(tracker[f])
-    return { ...defaultSettings, ...s, tracker }
-  } catch { return { ...defaultSettings } }
+    const s = JSON.parse(readFileSync(settingsFile(), 'utf8')) as SettingsFile
+    const auth: Record<string, TrackerAuth> = {}
+    for (const [k, v] of Object.entries(s.auth ?? {})) { const a = { ...emptyAuth(), ...v }; for (const f of SECRET_FIELDS) a[f] = dec(a[f]); auth[k] = a }
+    return { ...defaultSettings, ...s, auth }
+  } catch { return { ...defaultSettings, auth: {} } }
 }
-function writeSettings(merged: Settings): void {
+function writeSettingsFile(s: SettingsFile): void {
   mkdirSync(dirname(settingsFile()), { recursive: true })
-  const onDisk = { ...merged, tracker: { ...merged.tracker } }
-  for (const f of SECRET_FIELDS) onDisk.tracker[f] = enc(onDisk.tracker[f])
+  const onDisk: SettingsFile = { ...s, auth: {} }
+  for (const [k, v] of Object.entries(s.auth ?? {})) { const a = { ...v }; for (const f of SECRET_FIELDS) a[f] = enc(a[f]); onDisk.auth![k] = a }
+  delete onDisk.tracker
   writeFileSync(settingsFile(), JSON.stringify(onDisk, null, 2))
 }
-/** The renderer never receives token values, only whether they exist. */
-function publicSettings(s: Settings): Settings {
-  return { ...s, tracker: { ...s.tracker, linearAccessToken: s.tracker.linearAccessToken ? '***' : '', linearRefreshToken: s.tracker.linearRefreshToken ? '***' : '' } }
-}
+function loadSettings(): Settings { const { auth: _a, tracker: _t, ...s } = readSettingsFile(); return s }
 function saveSettings(s: Settings): Settings {
-  const current = loadSettings()
-  const tracker = { ...defaultSettings.tracker, ...(s.tracker ?? {}) } as Settings['tracker']
-  // keep stored tokens unless the renderer explicitly clears them
-  if (tracker.linearAccessToken === '***') tracker.linearAccessToken = current.tracker.linearAccessToken
-  if (tracker.linearRefreshToken === '***') tracker.linearRefreshToken = current.tracker.linearRefreshToken
-  if (!tracker.linearAccessToken) tracker.linearTokenExpiry = 0
-  const merged = { ...defaultSettings, ...s, tracker }
-  writeSettings(merged)
+  const file = readSettingsFile()
+  const merged: SettingsFile = { ...file, ...defaultSettings, ...s, auth: file.auth }
+  writeSettingsFile(merged)
   git.setGitExecutable(merged.gitPath)
-  configureTracker(merged.tracker, persistTokens)
-  return publicSettings(merged)
+  for (const o of orgs.listOrgs()) configureOrgHosting(o.id)
+  return loadSettings()
 }
-function persistTokens(patch: Partial<Settings['tracker']>): void {
-  const s = loadSettings(); s.tracker = { ...s.tracker, ...patch }; writeSettings(s)
+const authKey = (orgId: string, provider: string) => `${orgId}:${provider}`
+function loadAuth(orgId: string, provider: string): TrackerAuth { return readSettingsFile().auth?.[authKey(orgId, provider)] ?? emptyAuth() }
+function saveAuth(orgId: string, provider: string, patch: Partial<TrackerAuth>): void {
+  const file = readSettingsFile(); file.auth = file.auth ?? {}
+  file.auth[authKey(orgId, provider)] = { ...emptyAuth(), ...(file.auth[authKey(orgId, provider)] ?? {}), ...patch }
+  writeSettingsFile(file)
+}
+/** The resolved runtime settings for an organization's tracker: shareable config + this person's auth. */
+function trackerSettings(orgId: string): TrackerSettings {
+  const cfg = orgs.getOrg(orgId).tracker
+  return { ...cfg, ...loadAuth(orgId, cfg.provider) }
+}
+function configureOrgTracker(orgId: string): void {
+  const cfg = orgs.getOrg(orgId).tracker
+  configureTrackerFor(orgId, trackerSettings(orgId), (patch) => {
+    const authPatch: Partial<TrackerAuth> = {}
+    for (const f of [...SECRET_FIELDS, 'linearTokenExpiry'] as const) if (f in patch) (authPatch as Record<string, unknown>)[f] = (patch as Record<string, unknown>)[f]
+    saveAuth(orgId, cfg.provider, authPatch)
+  })
+}
+/** The organization's hosting provider with this person's token and the configured gh path. */
+function configureOrgHosting(orgId: string): void {
+  const org = orgs.getOrg(orgId)
+  configureHostingFor(orgId, org.hosting, { token: loadAuth(orgId, 'github').githubToken, ghPath: loadSettings().ghPath })
+}
+/** Slack notifier for the organization when enabled and this person has a webhook. */
+function notifierFor(orgId: string) {
+  const org = orgs.getOrg(orgId)
+  const webhook = loadAuth(orgId, 'slack').slackWebhook
+  if (!org.notifications.slack.enabled || !webhook) return undefined
+  const ev = org.notifications.slack
+  return slackNotifier(webhook, org.name, { created: ev.created, merged: ev.merged, finished: ev.finished, reverted: ev.reverted } as Record<ReleaseEvent, boolean>)
+}
+const releaseDeps = (orgId: string) => ({ tracker: trackerFor(orgId), hosting: hostingFor(orgId), notify: notifierFor(orgId) })
+/** Legacy single tracker block in settings.json (pre-organizations) -> Personal organization config + auth. */
+function legacyTracker(): { config: TrackerConfig; auth: TrackerAuth } | null {
+  const t = readSettingsFile().tracker as Record<string, string | number> | undefined
+  if (!t || typeof t !== 'object') return null
+  const a = emptyAuth()
+  for (const f of SECRET_FIELDS) a[f] = dec(String(t[f] ?? ''))
+  a.linearTokenExpiry = Number(t['linearTokenExpiry'] ?? 0)
+  return { config: { provider: (t['provider'] as TrackerConfig['provider']) ?? 'none', authMethod: (t['authMethod'] as TrackerConfig['authMethod']) ?? 'oauth', linearClientId: String(t['linearClientId'] ?? ''), jiraSite: '', stateOnStart: String(t['stateOnStart'] ?? 'In Progress') }, auth: a }
 }
 
 // ---------- file watching ----------
@@ -158,7 +189,7 @@ function buildMenu(): void {
       label: 'Repository',
       submenu: [
         { label: 'Open Repository…', accelerator: 'CmdOrCtrl+O', click: send('repo:open') },
-        { label: 'Clone…', accelerator: 'CmdOrCtrl+Shift+O', click: send('repo:clone') },
+        { label: 'Clone…', accelerator: 'CmdOrCtrl+Shift+C', click: send('repo:clone') },
         { label: 'Initialize…', click: send('repo:init') },
         { type: 'separator' },
         { label: 'Apply Patch…', click: send('repo:apply-patch') },
@@ -181,7 +212,7 @@ function buildMenu(): void {
     {
       label: 'Local',
       submenu: [
-        { label: 'Commit…', accelerator: 'CmdOrCtrl+K', click: send('local:commit') },
+        { label: 'Commit…', accelerator: 'CmdOrCtrl+Shift+K', click: send('local:commit') },
         { label: 'Stage All', accelerator: 'CmdOrCtrl+Shift+A', click: send('local:stage-all') },
         { label: 'Stash…', accelerator: 'CmdOrCtrl+Shift+S', click: send('local:stash') },
         { type: 'separator' },
@@ -192,10 +223,14 @@ function buildMenu(): void {
     {
       label: 'View',
       submenu: [
+        { label: 'Quick Open…', accelerator: 'CmdOrCtrl+K', click: send('view:quick-open') },
+        { type: 'separator' },
         { label: 'Standard Window', accelerator: 'CmdOrCtrl+1', click: send('view:standard') },
         { label: 'Log Window', accelerator: 'CmdOrCtrl+2', click: send('view:log') },
         { label: 'Working Tree Window', accelerator: 'CmdOrCtrl+3', click: send('view:worktree') },
         { label: 'Release Window', accelerator: 'CmdOrCtrl+4', click: send('view:release') },
+        { label: 'Organization Window', accelerator: 'CmdOrCtrl+5', click: send('view:organization') },
+        { label: 'Switch Organization…', accelerator: 'CmdOrCtrl+Shift+O', click: send('org:switch') },
         { type: 'separator' },
         { label: 'Toggle Theme', click: send('view:theme') },
         { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: send('view:settings') },
@@ -229,48 +264,147 @@ function registerIpc(): void {
       target = r.filePaths[0]
     }
     if (!(await git.isRepo(target))) throw new Error(`${target} is not a Git repository`)
-    const entry = await registerRepo(target)
+    const entry = await registerRepo(target, orgs.activeOrgId())
     await watchRepo(entry.path)
     return entry
   })
   handle('repos:remove', (path: string) => {
-    saveRepos(loadRepos().filter((r) => r.path !== path))
+    orgs.removeRepo(path)
     watchers.get(path)?.close(); watchers.delete(path)
   })
   handle('repos:clone', async (url: string, dest: string) => {
     await git.clone(url, dest)
-    const entry = await registerRepo(dest)
+    const entry = await registerRepo(dest, orgs.activeOrgId())
     await watchRepo(entry.path)
     return entry
   })
   handle('repos:init', async (path: string) => {
     await git.init(path)
-    const entry = await registerRepo(path)
+    const entry = await registerRepo(path, orgs.activeOrgId())
     await watchRepo(entry.path)
     return entry
   })
-  handle('repos:groups', () => loadGroups())
-  handle('repos:createGroup', (name: string) => {
-    const n = name.trim()
-    if (!n) throw new Error('Group name is empty')
-    const list = loadGroups()
-    if (!list.includes(n)) { list.push(n); saveGroups(list) }
-    return list
+  handle('repos:groups', () => orgs.groups(orgs.activeOrgId()))
+  handle('repos:createGroup', (name: string) => orgs.createGroup(orgs.activeOrgId(), name))
+  handle('repos:renameGroup', (oldName: string, newName: string) => orgs.renameGroup(orgs.activeOrgId(), oldName, newName))
+  handle('repos:deleteGroup', (name: string) => orgs.deleteGroup(orgs.activeOrgId(), name))
+  handle('repos:setGroup', (path: string, group: string | null) => orgs.setRepoGroup(path, group))
+
+  // ---- organizations
+  handle('org:workspace', () => orgs.workspace())
+  handle('org:get', (id: string) => orgs.getOrg(id))
+  handle('org:setActive', (id: string) => { const w = orgs.setActive(id); setActiveTrackerOrg(id); configureOrgTracker(id); configureOrgHosting(id); return w })
+  handle('org:create', async (input: { name: string; color?: string; repoPaths?: string[]; moveTrackerFrom?: string | null }) => {
+    const from = input.moveTrackerFrom ? orgs.getOrg(input.moveTrackerFrom) : null
+    const o = orgs.createOrg({ name: input.name, color: input.color, tracker: from ? from.tracker : undefined })
+    if (from) {
+      saveAuth(o.id, from.tracker.provider, loadAuth(from.id, from.tracker.provider))
+      orgs.updateOrg(from.id, { tracker: { provider: 'none', authMethod: 'oauth', linearClientId: '', jiraSite: '', stateOnStart: from.tracker.stateOnStart } })
+      saveAuth(from.id, from.tracker.provider, emptyAuth())
+      configureOrgTracker(from.id)
+    }
+    for (const p of input.repoPaths ?? []) orgs.moveRepo(p, o.id)
+    configureOrgTracker(o.id); configureOrgHosting(o.id)
+    return orgs.getOrg(o.id)
   })
-  handle('repos:renameGroup', (oldName: string, newName: string) => {
-    const n = newName.trim()
-    if (!n) throw new Error('Group name is empty')
-    saveGroups(loadGroups().map((g) => (g === oldName ? n : g)).filter((g, i, a) => a.indexOf(g) === i))
-    saveRepos(loadRepos().map((r) => (r.group === oldName ? { ...r, group: n } : r)))
+  handle('org:update', (id: string, patch: Partial<Omit<Organization, 'id' | 'createdAt'>>) => {
+    if (patch.pipeline) patch.pipeline = release.validatePipeline(patch.pipeline)
+    const o = orgs.updateOrg(id, patch)
+    configureOrgTracker(id); configureOrgHosting(id)
+    return o
   })
-  handle('repos:deleteGroup', (name: string) => {
-    saveGroups(loadGroups().filter((g) => g !== name))
-    saveRepos(loadRepos().map((r) => (r.group === name ? { ...r, group: null } : r)))
+  handle('org:delete', (id: string) => { const w = orgs.deleteOrg(id); setActiveTrackerOrg(w.active); return w })
+  handle('org:moveRepo', (path: string, orgId: string) => { orgs.moveRepo(path, orgId) })
+  handle('org:proposals', async () => { await fillRemotes(); return orgs.proposals(orgs.activeOrgId()) })
+  handle('org:export', async (id: string) => {
+    const data = orgs.exportOrg(id)
+    const r = await dialog.showSaveDialog({ title: 'Export organization', defaultPath: `${orgs.slugify(data.organization.name)}.pakgit-org.json`, filters: [{ name: 'PakGit organization', extensions: ['json'] }] })
+    if (r.canceled || !r.filePath) return null
+    writeFileSync(r.filePath, JSON.stringify(data, null, 2))
+    return r.filePath
   })
-  handle('repos:setGroup', (path: string, group: string | null) => {
-    if (group && !loadGroups().includes(group)) saveGroups([...loadGroups(), group])
-    saveRepos(loadRepos().map((r) => (r.path === path ? { ...r, group } : r)))
+  handle('org:import', async () => {
+    const r = await dialog.showOpenDialog({ title: 'Import organization', properties: ['openFile'], filters: [{ name: 'PakGit organization', extensions: ['json'] }] })
+    if (r.canceled || !r.filePaths[0]) return null
+    await fillRemotes()
+    const data = JSON.parse(readFileSync(r.filePaths[0], 'utf8')) as OrgExport
+    const res = orgs.importOrg(data)
+    configureOrgTracker(res.org.id); configureOrgHosting(res.org.id)
+    return res
   })
+  handle('org:overview', (id: string, opts?: { refresh?: boolean }) => orgOverview(id, { refresh: !!opts?.refresh, tracker: trackerFor(id) }))
+  handle('org:index', (id: string, opts?: { refresh?: boolean }) => workindex.index(id, { refresh: !!opts?.refresh, tracker: trackerFor(id) }))
+  handle('org:startWork', (id: string, req: StartWorkRequest) => workindex.startWork(id, req))
+  handle('org:suggestBranch', (id: string, issue: { key: string; title: string; branchName?: string }) => workindex.suggestBranch(id, issue))
+  // ---- phase 3: hosting, gates, releases, freeze, probes
+  handle('org:hostingStatus', (id: string) => hostingFor(id).status())
+  handle('org:hostingSetToken', (id: string, token: string) => { saveAuth(id, 'github', { githubToken: token.trim() }); configureOrgHosting(id) })
+  handle('org:evaluateGates', (id: string, envId: string, selection: ReleaseSelection[]) => releases.checkGates(id, envId, selection, releaseDeps(id)))
+  handle('org:releases', (id: string) => releases.listReleases(id))
+  handle('org:createRelease', (id: string, req: CreateReleaseRequest) => releases.createRelease(id, req, releaseDeps(id)))
+  handle('org:resumeRelease', (id: string, releaseId: string, repo: string, opts: { skipRemaining: boolean }) => releases.resumeRelease(id, releaseId, repo, opts, releaseDeps(id)))
+  handle('org:dropReleaseRepo', (id: string, releaseId: string, repo: string, reason: string) => releases.dropRepo(id, releaseId, repo, reason))
+  handle('org:refreshRelease', (id: string, releaseId: string) => releases.refreshRelease(id, releaseId, releaseDeps(id)))
+  handle('org:finishRelease', (id: string, releaseId: string, opts: { push: boolean; updateTracker: boolean }) => releases.finishRelease(id, releaseId, opts, releaseDeps(id)))
+  handle('org:dropRelease', (id: string, releaseId: string, reason: string) => releases.dropRelease(id, releaseId, reason))
+  handle('org:releaseNotes', (id: string, releaseId: string) => releases.releaseNotes(id, releaseId))
+  handle('org:setFreeze', (id: string, envId: string, freeze: Freeze | null) => orgs.setFreeze(id, envId, freeze))
+  handle('org:probe', async (id: string, repo?: string) => {
+    const out: Record<string, ProbeResult[]> = {}
+    for (const r of orgs.orgRepos(id).filter((x) => !repo || x.path === repo)) {
+      if (!existsSync(r.path)) continue
+      try { const p = await release.repoPipeline(r.path); const res = await probeRepo(r.path, p.resolved, p.override.probes, !!repo); if (res.length) out[r.path] = res } catch { /* no probes */ }
+    }
+    return out
+  })
+  handle('hosting:pullRequests', (repo: string, fresh?: boolean) => hostingFor(orgs.orgOfRepo(repo)).listPullRequests(repo, !!fresh))
+  // ---- phase 4: sharing, secrets, notifications, revert, cleanup, calendar
+  handle('org:configSync', (id: string, fresh?: boolean) => configrepo.sync(id, !!fresh))
+  handle('org:configApply', async (id: string) => { const r = await configrepo.apply(id); configureOrgTracker(id); configureOrgHosting(id); return r })
+  handle('org:configPush', (id: string, message: string) => configrepo.push(id, message ?? ''))
+  handle('org:setSecret', (id: string, secrets: { slackWebhook?: string; jiraEmail?: string; jiraToken?: string }) => {
+    if (secrets.slackWebhook !== undefined) saveAuth(id, 'slack', { slackWebhook: secrets.slackWebhook.trim() })
+    const jira: Partial<TrackerAuth> = {}
+    if (secrets.jiraEmail !== undefined) jira.jiraEmail = secrets.jiraEmail.trim()
+    if (secrets.jiraToken !== undefined && secrets.jiraToken.trim()) jira.jiraToken = secrets.jiraToken.trim()
+    if (Object.keys(jira).length) { saveAuth(id, 'jira', jira); configureOrgTracker(id) }
+  })
+  handle('org:secretsStatus', (id: string) => ({ slackWebhook: !!loadAuth(id, 'slack').slackWebhook, jiraToken: !!loadAuth(id, 'jira').jiraToken, jiraEmail: loadAuth(id, 'jira').jiraEmail }))
+  handle('org:testSlack', async (id: string) => { const w = loadAuth(id, 'slack').slackWebhook; if (!w) throw new Error('No Slack webhook stored for this organization'); await postSlack(w, `PakGit: test message from ${orgs.getOrg(id).name}`) })
+  handle('org:revertRelease', (id: string, releaseId: string, opts: { push: boolean; openPr: boolean }) => releases.revertRelease(id, releaseId, opts, releaseDeps(id)))
+  handle('org:mergedBranches', (id: string) => cleanup.mergedBranches(id))
+  handle('org:deleteBranches', (id: string, list: { repo: string; name: string }[]) => cleanup.deleteBranches(id, list))
+  handle('org:nextReleases', (id: string) => orgs.nextReleases(orgs.getOrg(id)))
+  handle('org:trackerStatus', async (id: string) => {
+    const cfg = orgs.getOrg(id).tracker; const auth = loadAuth(id, cfg.provider)
+    const st = await trackerFor(id).status()
+    return { ...st, provider: cfg.provider, hasApiKey: !!auth.linearApiKey, signedIn: !!auth.linearAccessToken }
+  })
+  handle('org:trackerSetSecrets', (id: string, secrets: { linearApiKey?: string; linearClientSecret?: string }) => {
+    const cfg = orgs.getOrg(id).tracker
+    saveAuth(id, cfg.provider, secrets)
+    configureOrgTracker(id)
+  })
+  const loginOrg = async (id: string) => {
+    try {
+      const patch = await linearLogin(trackerSettings(id))
+      saveAuth(id, 'linear', patch as Partial<TrackerAuth>)
+      if (orgs.getOrg(id).tracker.authMethod !== 'oauth') orgs.updateOrg(id, { tracker: { ...orgs.getOrg(id).tracker, authMethod: 'oauth' } })
+      configureOrgTracker(id)
+      const st = await trackerFor(id).status()
+      for (const w of BrowserWindow.getAllWindows()) { w.show(); w.focus() }
+      return { ok: !st.error, account: st.account, error: st.error }
+    } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) } }
+  }
+  const logoutOrg = async (id: string) => {
+    await linearLogout(trackerSettings(id))
+    saveAuth(id, 'linear', { linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0 })
+    configureOrgTracker(id)
+  }
+  handle('org:trackerLogin', (id: string) => loginOrg(id))
+  handle('org:trackerLogout', (id: string) => logoutOrg(id))
+  handle('release:repoPipeline', (repo: string) => release.repoPipeline(repo))
+  handle('release:saveRepoPipeline', (repo: string, o: RepoPipelineOverride) => release.saveRepoPipeline(repo, o))
   handle('dialog:directory', async (title?: string) => {
     const r = await dialog.showOpenDialog({ title: title ?? 'Select Directory', properties: ['openDirectory', 'createDirectory'] })
     return r.canceled ? null : r.filePaths[0] ?? null
@@ -316,8 +450,10 @@ function registerIpc(): void {
   handle('git:stashSave', (repo: string, msg?: string, u?: boolean) => git.stashSave(repo, msg, u))
   handle('git:stashApply', (repo: string, i: number, pop?: boolean) => git.stashApply(repo, i, pop))
   handle('git:stashDrop', (repo: string, i: number) => git.stashDrop(repo, i))
-  handle('git:addRemote', (repo: string, n: string, u: string) => git.addRemote(repo, n, u))
-  handle('git:removeRemote', (repo: string, n: string) => git.removeRemote(repo, n))
+  // the remote identity keys the repository's planning state: refresh it when remotes change
+  const remoteChanged = async (repo: string): Promise<void> => { release.forgetIdentity(repo); if (orgs.findRepo(repo)) orgs.setRepoRemote(repo, await remoteIdentity(repo)) }
+  handle('git:addRemote', async (repo: string, n: string, u: string) => { await git.addRemote(repo, n, u); await remoteChanged(repo) })
+  handle('git:removeRemote', async (repo: string, n: string) => { await git.removeRemote(repo, n); await remoteChanged(repo) })
   handle('git:version', () => git.version())
   handle('git:submodules', (repo: string) => git.submodules(repo))
   handle('git:submoduleUpdate', (repo: string, paths?: string[]) => git.submoduleUpdate(repo, paths))
@@ -338,7 +474,10 @@ function registerIpc(): void {
   })
   handle('release:config', (repo: string) => release.releaseConfig(repo))
   handle('release:saveConfig', (repo: string, cfg: Parameters<typeof release.saveReleaseConfig>[1]) => release.saveReleaseConfig(repo, cfg))
-  handle('release:analyze', (repo: string) => release.analyze(repo))
+  handle('release:analyze', async (repo: string, opts?: { refresh?: boolean }) => {
+    const orgId = orgs.orgOfRepo(repo)
+    return release.analyze(repo, { cache: !opts?.refresh, tracker: trackerFor(orgId), prefixes: await workindex.prefixHint(orgId, trackerFor(orgId)) })
+  })
   handle('release:promote', (repo: string, env: string, items: release.PromoteInput[], push: boolean) => release.promote(repo, env, items, push))
   handle('release:start', (repo: string, env: string, name: string, items: release.PromoteInput[], push: boolean) => release.startRelease(repo, env, name, items, push))
   handle('release:finish', (repo: string, env: string, branch: string, tag: string | null, push: boolean) => release.finishRelease(repo, env, branch, tag, push))
@@ -347,6 +486,7 @@ function registerIpc(): void {
   handle('release:prepareBranch', (repo: string, env: string, target: BranchTarget, items: release.PromoteInput[], options: PrepareOptions) => release.prepareBranch(repo, env, target, items, options))
   handle('release:setArchived', (repo: string, ids: string[], archived: boolean) => release.setArchived(repo, ids, archived))
   handle('release:setOverrides', (repo: string, id: string, o: Record<string, boolean> | null) => release.setOverrides(repo, id, o))
+  handle('release:setLink', (repo: string, id: string, key: string | null) => release.setLink(repo, id, key))
   handle('release:openFeaturePRs', (repo: string, env: string, items: release.PromoteInput[]) => release.openFeaturePRs(repo, env, items))
   handle('release:openPR', (repo: string, head: string, base: string, title: string, body: string) => release.openPullRequest(repo, head, base, title, body))
   handle('release:startIssue', (repo: string, _key: string, branchName: string) => release.startIssue(repo, branchName))
@@ -356,26 +496,14 @@ function registerIpc(): void {
   handle('tracker:myIssues', () => tracker().myActiveIssues())
   handle('tracker:setState', (key: string, state: string) => tracker().setState(key, state))
   handle('tracker:states', (key: string) => tracker().states(key))
-  handle('settings:get', () => publicSettings(loadSettings()))
+  handle('tracker:listIssues', (q: IssueQuery) => tracker().listIssues(q ?? {}))
+  handle('tracker:teams', () => tracker().teams())
+  handle('tracker:assignToMe', (key: string) => tracker().assignToMe(key))
+  handle('settings:get', () => loadSettings())
   handle('settings:save', (s: Settings) => saveSettings(s))
-  handle('tracker:login', async () => {
-    const s = loadSettings()
-    try {
-      const patch = await linearLogin(s.tracker)
-      persistTokens({ ...patch, authMethod: 'oauth' })
-      configureTracker(loadSettings().tracker, persistTokens)
-      const st = await tracker().status()
-      for (const w of BrowserWindow.getAllWindows()) { w.show(); w.focus() }
-      return { ok: !st.error, account: st.account, error: st.error }
-    } catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) } }
-  })
-  handle('tracker:logout', async () => {
-    const s = loadSettings()
-    await linearLogout(s.tracker)
-    persistTokens({ linearAccessToken: '', linearRefreshToken: '', linearTokenExpiry: 0 })
-    configureTracker(loadSettings().tracker, persistTokens)
-  })
   handle('tracker:redirectUrl', () => OAUTH_REDIRECT)
+  handle('tracker:login', () => loginOrg(orgs.activeOrgId()))
+  handle('tracker:logout', () => logoutOrg(orgs.activeOrgId()))
   handle('git:applyPatch', (repo: string, patch: string, o: { cached: boolean; reverse?: boolean }) => git.applyPatch(repo, patch, o))
   handle('git:resolveConflict', (repo: string, path: string, side: 'ours' | 'theirs') => git.resolveConflict(repo, path, side))
   handle('git:markResolved', (repo: string, paths: string[]) => git.markResolved(repo, paths))
@@ -400,11 +528,24 @@ function registerIpc(): void {
   handle('os:reveal', (repo: string, path?: string) => shell.showItemInFolder(path ? join(repo, path) : repo))
 }
 
+// Dev/test helper: run against another profile folder without touching the real one.
+if (process.env.PAKGIT_USER_DATA) app.setPath('userData', process.env.PAKGIT_USER_DATA)
+
 app.whenReady().then(() => {
   git.setLogSink((line) => broadcast('git:log', line))
   git.setGitExecutable(loadSettings().gitPath)
-  configureTracker(loadSettings().tracker, persistTokens)
+  orgs.setOrgDir(app.getPath('userData'))
+  // migration: flat repositories/groups and the single tracker block become the Personal organization
+  const legacy = legacyTracker()
+  const m = orgs.ensureMigrated(legacy?.config ?? null)
+  if (m.migrated && legacy) { saveAuth(orgs.PERSONAL, legacy.config.provider, legacy.auth); const f = readSettingsFile(); delete f.tracker; writeSettingsFile(f) }
+  for (const o of orgs.listOrgs()) { configureOrgTracker(o.id); configureOrgHosting(o.id) }
+  setActiveTrackerOrg(orgs.activeOrgId())
+  void fillRemotes()
   release.setReleaseConfigDir(app.getPath('userData'))
+  configrepo.setConfigRepoDir(app.getPath('userData'))
+  release.setTemplateProvider((repo) => { try { return orgs.getOrg(orgs.orgOfRepo(repo)).pipeline } catch { return null } })
+  release.setIdentityProvider((repo) => orgs.findRepo(repo)?.remote ?? undefined)
   release.setPrOpener((url) => shell.openExternal(url))
   registerIpc()
   buildMenu()

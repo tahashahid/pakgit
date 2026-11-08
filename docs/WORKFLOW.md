@@ -128,6 +128,34 @@ nothing else is needed. Optionally, after a release, **rebuild `dev`**: reset `d
 to `main` and re-merge the still-open feature branches. This removes leftovers and is
 safe because every branch still exists.
 
+### Working across repositories
+
+An issue often touches more than one repository (the admin portal and a lambda, say). The
+Organization window (Cmd/Ctrl+5) puts every repository of the organization in one place:
+
+- **Work** lists the Linear issues with one column per repository. A cell shows the highest
+  environment the issue has reached there, or "—" when nothing has been started. *Start work…*
+  creates the same branch name in several repositories at once; *Link branch…* attaches a
+  branch that follows no naming convention to its issue.
+- **Ready** is the release table across repositories. An issue whose parts sit on different
+  environments is marked *partly promoted*: promote the lagging repository before releasing.
+  *Promote selected…* opens that repository's Release view with the items ticked.
+- *Promote selected…* in Ready creates one **release** across the selected repositories: the
+  pre-flight checks run first (Linear state, partly promoted, cut from dev, freeze, previous
+  environment), then one branch name is created in each repository in deploy order, the
+  items are merged, and one pull request per repository is opened on GitHub. A conflict
+  pauses only that repository: resolve it there, commit, and press *Resume* on the release.
+- **Releases** follows each release from created to finished: pull-request state, checks and
+  review per repository, whether the branch landed, and *Finish* once everything is merged
+  (back-merges the environment into the earlier ones and moves the Linear issues).
+- A release that went wrong gets *Revert…*: a revert branch and pull request per repository,
+  never a force-push. *Clean up…* in the Organization header deletes remote branches that are
+  already in the last environment.
+- The organization settings (pipeline, gates, conventions, views, calendar) can live in a
+  small git repository the team shares: Configure ▸ Sharing. PakGit shows a banner when a
+  teammate changed them and applies the change on request.
+- Quick open (Cmd/Ctrl+K) jumps to any repository, branch, issue or release branch.
+
 ## Rules that keep conflicts rare
 
 | Rule | Why |

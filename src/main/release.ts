@@ -1,8 +1,15 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { createHash } from 'crypto'
 import { dirname, join } from 'path'
 import * as git from './git'
 import { tracker } from './tracker'
-import type { BranchTarget, Commit, EnvConfig, Environment, PrepareOptions, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem } from '@shared/types'
+import type { TrackerProvider } from './tracker/provider'
+import type { BranchTarget, Commit, EnvConfig, Environment, PrepareOptions, PromoteInput, PromoteResult, PullRequestInfo, ReleaseAnalysis, ReleaseBranchRef, ReleaseItem, RepoPipeline, RepoPipelineOverride } from '@shared/types'
+export type { PromoteInput }
+import { applyOverride, normalizeRemote } from './organizations'
+
+const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return d } }
+const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(v, null, 2)) }
 
 // ---------- pull requests on the hosting provider ----------
 
@@ -42,10 +49,76 @@ export async function openPullRequest(repo: string, head: string, base: string, 
 // ---------- per-repository environment configuration ----------
 
 let configDir = ''
-/** Directory holding release-config.json (the Electron userData folder; a temp dir in tests). */
+/** Directory holding the per-repository state (the Electron userData folder; a temp dir in tests). */
 export function setReleaseConfigDir(dir: string): void { configDir = dir }
-const cfgFile = () => join(configDir || process.cwd(), 'release-config.json')
-function loadAll(): Record<string, EnvConfig> { try { return JSON.parse(readFileSync(cfgFile(), 'utf8')) } catch { return {} } }
+const baseDir = () => configDir || process.cwd()
+
+// ---------- per-repository state, keyed by the repository's remote identity ----------
+//
+// State lives in <userData>/repos/<slug>-<hash>/{pipeline,archive,overrides,links,analysis-cache}.json where the
+// hash is taken from the normalised remote URL, so a re-clone or a second checkout shares it. Repositories
+// without a remote are keyed by their path. Entries from the flat pre-phase-2 files move over on first use.
+
+/** Where a repository's identity comes from first (the workspace registry); undefined = unknown, ask git. */
+let identityProvider: (repo: string) => string | null | undefined = () => undefined
+export function setIdentityProvider(fn: (repo: string) => string | null | undefined): void { identityProvider = fn; identityCache.clear() }
+const identityCache = new Map<string, string>()
+export function forgetIdentity(repo: string): void { identityCache.delete(repo) }
+/** github.com/owner/repo for repositories with a remote, else local:<path>. */
+export async function repoIdentity(repo: string): Promise<string> {
+  const cached = identityCache.get(repo); if (cached) return cached
+  let id = identityProvider(repo) ?? null
+  if (!id) {
+    const names = (await git.run(['remote'], { cwd: repo, allowFail: true })).stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+    for (const name of [...names.filter((n) => n === 'origin'), ...names.filter((n) => n !== 'origin')]) {
+      const r = await git.run(['remote', 'get-url', name], { cwd: repo, allowFail: true })
+      id = r.code === 0 ? normalizeRemote(r.stdout.trim()) : null
+      if (id) break
+    }
+  }
+  const identity = id ?? `local:${repo}`
+  identityCache.set(repo, identity)
+  return identity
+}
+function stateDirFor(identity: string): string {
+  const hash = createHash('sha1').update(identity).digest('hex').slice(0, 10)
+  const slug = (identity.split('/').pop() ?? '').replace(/[^a-z0-9.-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 40) || 'repo'
+  return join(baseDir(), 'repos', `${slug}-${hash}`)
+}
+/** The repository's state folder (exported for tests and diagnostics). */
+export async function repoStateDir(repo: string): Promise<string> { return stateDirFor(await repoIdentity(repo)) }
+type StateKind = 'pipeline' | 'archive' | 'overrides' | 'links'
+const LEGACY_FILES: Record<StateKind, string | null> = { pipeline: 'release-config.json', archive: 'release-archive.json', overrides: 'release-overrides.json', links: null }
+async function stateFile(repo: string, kind: StateKind): Promise<string> {
+  const identity = await repoIdentity(repo)
+  const dir = stateDirFor(identity)
+  const file = join(dir, `${kind}.json`)
+  const legacyName = LEGACY_FILES[kind]
+  if (!existsSync(file) && legacyName) {
+    const legacyPath = join(baseDir(), legacyName)
+    const all = readJson<Record<string, unknown>>(legacyPath, {})
+    if (repo in all) { writeJson(file, all[repo]); delete all[repo]; writeJson(legacyPath, all) }
+  }
+  const metaFile = join(dir, 'meta.json')
+  const meta = readJson<{ identity: string; paths: string[] }>(metaFile, { identity, paths: [] })
+  if (!meta.paths.includes(repo)) { meta.paths.push(repo); writeJson(metaFile, meta) }
+  return file
+}
+async function readState<T>(repo: string, kind: StateKind, d: T): Promise<T> { return readJson(await stateFile(repo, kind), d) }
+async function writeState(repo: string, kind: StateKind, v: unknown): Promise<void> { writeJson(await stateFile(repo, kind), v) }
+
+/** The repository's pipeline override (legacy entries are full configs and are read as custom pipelines). */
+async function loadOverride(repo: string): Promise<RepoPipelineOverride> {
+  const raw = await readState<Record<string, unknown> | null>(repo, 'pipeline', null)
+  if (!raw || typeof raw !== 'object') return { mode: 'org' }
+  if (typeof raw['mode'] === 'string') return raw as unknown as RepoPipelineOverride
+  const legacy = migrate(raw)
+  return legacy ? { mode: 'custom', custom: legacy } : { mode: 'org' }
+}
+
+/** Where a repository's organization pipeline template comes from; set by the main process. */
+let templateProvider: (repo: string) => EnvConfig | null = () => null
+export function setTemplateProvider(fn: (repo: string) => EnvConfig | null): void { templateProvider = fn }
 
 const DEV = ['dev', 'develop', 'development'], STAGE = ['stage', 'staging', 'uat', 'qa'], PROD = ['main', 'master', 'prod', 'production']
 
@@ -79,12 +152,17 @@ function migrate(raw: Record<string, unknown>): EnvConfig | null {
 }
 
 export async function releaseConfig(repo: string): Promise<EnvConfig> {
-  const saved = loadAll()[repo]
-  const migrated = saved ? migrate(saved as unknown as Record<string, unknown>) : null
-  if (migrated && migrated.environments.length) return migrated
-  return detectConfig(repo)
+  return (await repoPipeline(repo)).resolved
 }
-export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
+/** The repository's override, its organization template and the resolved pipeline. */
+export async function repoPipeline(repo: string): Promise<RepoPipeline> {
+  const override = await loadOverride(repo)
+  const template = templateProvider(repo)
+  if (override.mode === 'custom' && override.custom?.environments?.length) return { override, template, resolved: withDefaults(override.custom) }
+  if (template) return { override, template, resolved: withDefaults(applyOverride(withDefaults(template), override)) }
+  return { override, template: null, resolved: await detectConfig(repo) }
+}
+function validate(cfg: EnvConfig): EnvConfig {
   if (!cfg.environments.length) throw new Error('At least one environment is required')
   const ids = new Set<string>()
   for (const e of cfg.environments) {
@@ -96,31 +174,62 @@ export function saveReleaseConfig(repo: string, cfg: EnvConfig): EnvConfig {
   cfg = withDefaults(cfg)
   cfg.issuePrefixes = cfg.issuePrefixes.map((p) => p.trim().toUpperCase()).filter(Boolean)
   cfg.excludePrefixes = cfg.excludePrefixes.map((p) => p.trim()).filter(Boolean)
-  const all = loadAll(); all[repo] = cfg
-  mkdirSync(dirname(cfgFile()), { recursive: true }); writeFileSync(cfgFile(), JSON.stringify(all, null, 2))
   return cfg
+}
+/** Validate a pipeline (organization templates use this too). */
+export function validatePipeline(cfg: EnvConfig): EnvConfig { return validate(structuredClone(cfg)) }
+/** Save a fully custom pipeline for the repository (the legacy entry point). */
+/** Probes with a type and the fields that type needs; others are dropped. */
+function cleanProbes(probes: RepoPipelineOverride['probes']): RepoPipelineOverride['probes'] {
+  const out: NonNullable<RepoPipelineOverride['probes']> = {}
+  for (const [env, p] of Object.entries(probes ?? {})) {
+    if (!p || !p.type) continue
+    if ((p.type === 'http-json' || p.type === 'http-text') && !p.url?.trim()) continue
+    out[env] = { type: p.type, ...(p.url ? { url: p.url.trim() } : {}), ...(p.path ? { path: p.path.trim() } : {}), ...(p.regex ? { regex: p.regex } : {}), ...(p.tagPattern ? { tagPattern: p.tagPattern.trim() } : {}) }
+  }
+  return Object.keys(out).length ? out : undefined
+}
+export async function saveReleaseConfig(repo: string, cfg: EnvConfig, probes?: RepoPipelineOverride['probes']): Promise<EnvConfig> {
+  const custom = validate(cfg)
+  const prev = await loadOverride(repo)
+  const entry: RepoPipelineOverride = { mode: 'custom', custom }
+  const keep = cleanProbes(probes ?? prev.probes); if (keep) entry.probes = keep
+  await writeState(repo, 'pipeline', entry)
+  return custom
+}
+export async function saveRepoPipeline(repo: string, override: RepoPipelineOverride): Promise<EnvConfig> {
+  if (override.mode === 'custom') return saveReleaseConfig(repo, override.custom ?? (await detectConfig(repo)), override.probes)
+  const template = templateProvider(repo)
+  const clean: RepoPipelineOverride = { mode: 'org', branchMap: {}, disabled: override.disabled ?? [], strategyMap: {} }
+  for (const [k, v] of Object.entries(override.branchMap ?? {})) if (v && v.trim()) clean.branchMap![k] = v.trim()
+  for (const [k, v] of Object.entries(override.strategyMap ?? {})) if (v) clean.strategyMap![k] = v
+  const probes = cleanProbes(override.probes); if (probes) clean.probes = probes
+  if (template) applyOverride(withDefaults(template), clean) // throws when everything is disabled
+  await writeState(repo, 'pipeline', clean)
+  return (await repoPipeline(repo)).resolved
 }
 const envById = (cfg: EnvConfig, id: string): Environment => { const e = cfg.environments.find((x) => x.id === id); if (!e) throw new Error(`Unknown environment "${id}"`); return e }
 const lastEnv = (cfg: EnvConfig): Environment => cfg.environments[cfg.environments.length - 1]
 const baseBranch = (cfg: EnvConfig): string => envById(cfg, cfg.baseEnv).branch
 
-// ---------- archive and manual environment overrides (per repository) ----------
+// ---------- archive, manual environment overrides and manual issue links (per repository) ----------
 
-const archiveFile = () => join(configDir || process.cwd(), 'release-archive.json')
-const overridesFile = () => join(configDir || process.cwd(), 'release-overrides.json')
-const readJson = <T>(file: string, d: T): T => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return d } }
-const writeJson = (file: string, v: unknown): void => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(v, null, 2)) }
-export function setArchived(repo: string, ids: string[], archived: boolean): void {
-  const all = readJson<Record<string, string[]>>(archiveFile(), {})
-  const set = new Set(all[repo] ?? [])
+export async function setArchived(repo: string, ids: string[], archived: boolean): Promise<void> {
+  const set = new Set(await readState<string[]>(repo, 'archive', []))
   for (const id of ids) archived ? set.add(id) : set.delete(id)
-  all[repo] = [...set]; writeJson(archiveFile(), all)
+  await writeState(repo, 'archive', [...set])
 }
-export function setOverrides(repo: string, id: string, overrides: Record<string, boolean> | null): void {
-  const all = readJson<Record<string, Record<string, Record<string, boolean>>>>(overridesFile(), {})
-  all[repo] = all[repo] ?? {}
-  if (overrides && Object.keys(overrides).length) all[repo][id] = overrides; else delete all[repo][id]
-  writeJson(overridesFile(), all)
+export async function setOverrides(repo: string, id: string, overrides: Record<string, boolean> | null): Promise<void> {
+  const all = await readState<Record<string, Record<string, boolean>>>(repo, 'overrides', {})
+  if (overrides && Object.keys(overrides).length) all[id] = overrides; else delete all[id]
+  await writeState(repo, 'overrides', all)
+}
+/** Link a branch item without an issue key (its id is the normalised branch name) to an issue; null removes the link. */
+export async function setLink(repo: string, itemId: string, issueKey: string | null): Promise<void> {
+  const all = await readState<Record<string, string>>(repo, 'links', {})
+  const key = issueKey?.trim()
+  if (key) all[itemId.toLowerCase()] = tracker().normalizeKey(key); else delete all[itemId.toLowerCase()]
+  await writeState(repo, 'links', all)
 }
 
 // ---------- analysis ----------
@@ -129,6 +238,19 @@ const ENV_SUFFIX = /-(dev|develop|stage|staging|main|prod|production)$/i
 const run = (repo: string, args: string[], allowFail = false) => git.run(args, { cwd: repo, allowFail })
 
 /** Resolve an environment branch to the ref to analyse: remote-tracking ref when present, else local. */
+export async function resolveEnvRef(repo: string, cfg: EnvConfig, name: string): Promise<string | null> { return envRef(repo, cfg, name) }
+/** The branch exists locally or on the remote. */
+export async function branchExists(repo: string, remote: string, name: string): Promise<boolean> {
+  for (const c of [`refs/heads/${name}`, `refs/remotes/${remote}/${name}`]) if ((await run(repo, ['rev-parse', '--verify', '-q', c], true)).code === 0) return true
+  return false
+}
+/** Ref of a branch for comparisons: remote-tracking when present, else local, else null. */
+export async function branchRef(repo: string, remote: string, name: string): Promise<string | null> {
+  for (const c of [`${remote}/${name}`, name]) { const r = await run(repo, ['rev-parse', '--verify', '-q', c.startsWith(remote + '/') ? `refs/remotes/${c}` : `refs/heads/${c}`], true); if (r.code === 0) return c }
+  return null
+}
+/** The current git user name of a repository (for release records). */
+export async function gitUserName(repo: string): Promise<string> { const r = await run(repo, ['config', '--get', 'user.name'], true); return r.code === 0 ? r.stdout.trim() : '' }
 async function envRef(repo: string, cfg: EnvConfig, name: string): Promise<string | null> {
   for (const candidate of [`${cfg.remote}/${name}`, name]) {
     const r = await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${candidate}`], true)
@@ -145,26 +267,93 @@ async function mergedInto(repo: string, ref: string | null): Promise<Set<string>
   return new Set(stdout.split('\n').filter(Boolean))
 }
 
-export async function analyze(repo: string): Promise<ReleaseAnalysis> {
+/** Issue-key prefixes found in a repository's branch names with the issue numbers seen for each (for the organization-wide heuristic). */
+export async function branchKeyPrefixes(repo: string, keyPattern: RegExp = tracker().keyPattern): Promise<Map<string, Set<string>>> {
+  const keyRe = new RegExp(keyPattern.source, 'gi')
+  const seen = new Map<string, Set<string>>()
+  const r = await run(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes'], true)
+  if (r.code !== 0) return seen
+  for (const name of r.stdout.split('\n')) {
+    const k = name.replace(ENV_SUFFIX, '').match(keyRe)?.[0]?.toUpperCase()
+    if (!k) continue
+    const [pre, num] = k.split('-'); if (!seen.has(pre)) seen.set(pre, new Set()); seen.get(pre)!.add(num)
+  }
+  return seen
+}
+
+export interface AnalyzeOptions {
+  /** false bypasses the tip-keyed analysis cache (and re-fetches tracker data) */
+  cache?: boolean
+  /** tracker to use for key patterns and enrichment; default: the active organization's */
+  tracker?: TrackerProvider
+  /** issue-key prefixes seen across the organization, used when neither the pipeline nor the tracker names any */
+  prefixes?: string[]
+}
+/** What the analysis cache stores: everything that follows from refs + state (tracker data and HEAD are re-read). */
+interface AnalysisCacheEntry { key: string; at: number; analysis: Pick<ReleaseAnalysis, 'config' | 'refs' | 'items' | 'releaseBranches'> }
+const sha1 = (s: string): string => createHash('sha1').update(s).digest('hex')
+const inflight = new Map<string, Promise<ReleaseAnalysis>>()
+
+/** Analyse one repository; concurrent calls for the same repository share one run. */
+export function analyze(repo: string, opts: AnalyzeOptions = {}): Promise<ReleaseAnalysis> {
+  const k = `${repo}|${opts.cache === false ? 'fresh' : 'cached'}`
+  const running = inflight.get(k); if (running) return running
+  const p = analyzeRepo(repo, opts).finally(() => inflight.delete(k))
+  inflight.set(k, p)
+  return p
+}
+
+async function enrich(items: ReleaseItem[], t: TrackerProvider, fresh: boolean): Promise<void> {
+  const keys = items.map((it) => it.issueKey).filter((k): k is string => !!k)
+  if (!keys.length || !t.isConfigured()) return
+  if (fresh) t.invalidate?.(keys)
+  try { const issues = await t.getIssues(keys); const byKey = new Map(issues.map((i) => [i.key, i])); for (const it of items) if (it.issueKey) { const i = byKey.get(it.issueKey); if (i) it.issue = i } }
+  catch { /* shown via trackerStatus */ }
+}
+
+async function analyzeRepo(repo: string, opts: AnalyzeOptions): Promise<ReleaseAnalysis> {
   const cfg = await releaseConfig(repo)
+  const t = opts.tracker ?? tracker()
+  const keyRe = new RegExp(t.keyPattern.source, 'gi')
+  const archived = new Set(await readState<string[]>(repo, 'archive', []))
+  const overrides = await readState<Record<string, Record<string, boolean>>>(repo, 'overrides', {})
+  const links = await readState<Record<string, string>>(repo, 'links', {})
+  // which key prefixes count as issues: configured, else the tracker's team keys, else prefixes seen with 2+ numbers in branch names
+  let prefixes = new Set(cfg.issuePrefixes)
+  if (!prefixes.size) prefixes = new Set(await t.keyPrefixes().catch(() => []))
+  if (!prefixes.size && opts.prefixes?.length) prefixes = new Set(opts.prefixes.map((p) => p.toUpperCase()))
+
+  // all refs with sha + date: the branch list, and the cache key
+  const { stdout: dump } = await run(repo, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(committerdate:iso-strict)', 'refs/heads', 'refs/remotes'])
+  const cacheKey = sha1(dump + JSON.stringify({ v: 2, cfg, archived: [...archived].sort(), overrides, links, prefixes: [...prefixes].sort() }))
+  const cacheFile = join(await repoStateDir(repo), 'analysis-cache.json')
+  const head = await run(repo, ['rev-parse', '--abbrev-ref', 'HEAD'], true)
+  const currentBranch = head.code === 0 ? head.stdout.trim() : null
+  const rerere = (await run(repo, ['config', '--get', 'rerere.enabled'], true)).stdout.trim() === 'true'
+  if (opts.cache !== false) {
+    const c = readJson<AnalysisCacheEntry | null>(cacheFile, null)
+    if (c && c.key === cacheKey && c.analysis?.items) {
+      const a: ReleaseAnalysis = { ...c.analysis, currentBranch, rerere, fromCache: true }
+      await enrich(a.items, t, false)
+      return a
+    }
+  }
+
   const refs: Record<string, string | null> = {}
   const resolved = await Promise.all(cfg.environments.map((e) => envRef(repo, cfg, e.branch)))
   cfg.environments.forEach((e, i) => { refs[e.id] = resolved[i] }) // config order, deterministic
   const last = lastEnv(cfg)
   const prod = refs[last.id]
-  const t = tracker()
-  const keyRe = new RegExp(t.keyPattern.source, 'gi')
 
-  // all branches with sha + date
-  const { stdout } = await run(repo, ['for-each-ref', '--format=%(refname:short)%00%(objectname)%00%(committerdate:iso-strict)', 'refs/heads', 'refs/remotes'])
   const envNames = new Set(cfg.environments.map((e) => e.branch))
   const all: ReleaseBranchRef[] = []
   const releaseBranches: ReleaseBranchRef[] = []
-  for (const line of stdout.split('\n')) {
+  for (const line of dump.split('\n')) {
     if (!line) continue
-    const [ref, sha, date] = line.split('\0')
+    const [full, sha, date] = line.split('\0')
+    const ref = full.replace(/^refs\/(heads|remotes)\//, '')
     if (ref.endsWith('/HEAD')) continue
-    const isRemote = ref.startsWith(cfg.remote + '/')
+    const isRemote = full.startsWith('refs/remotes/') && ref.startsWith(cfg.remote + '/')
     const name = isRemote ? ref.slice(cfg.remote.length + 1) : ref
     const entry: ReleaseBranchRef = { ref, name, remote: isRemote ? cfg.remote : null, sha, date }
     if (envNames.has(name)) continue
@@ -182,9 +371,6 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
   await Promise.all(cfg.environments.map(async (e) => { merged[e.id] = await mergedInto(repo, refs[e.id]) }))
   const emptyEnv = (): Record<string, boolean> => Object.fromEntries(cfg.environments.map((e) => [e.id, false]))
 
-  // which key prefixes count as issues: configured, else the tracker's team keys, else prefixes seen with 2+ numbers in branch names
-  let prefixes = new Set(cfg.issuePrefixes)
-  if (!prefixes.size) prefixes = new Set(await t.keyPrefixes().catch(() => []))
   if (!prefixes.size) {
     const seen = new Map<string, Set<string>>()
     for (const b of byName.values()) { const k = b.name.match(keyRe)?.[0]?.toUpperCase(); if (k) { const [pre, num] = k.split('-'); if (!seen.has(pre)) seen.set(pre, new Set()); seen.get(pre)!.add(num) } }
@@ -194,25 +380,25 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
     for (const m of text.matchAll(keyRe)) { const k = t.normalizeKey(m[0]); if (prefixes.has(k.split('-')[0])) return k }
     return null
   }
-  const archived = new Set(readJson<Record<string, string[]>>(archiveFile(), {})[repo] ?? [])
-  const overrides = readJson<Record<string, Record<string, Record<string, boolean>>>>(overridesFile(), {})[repo] ?? {}
 
   // group branches into items by issue key, else by normalised name (strip -dev/-stage/-main variants)
   const items = new Map<string, ReleaseItem>()
   const itemFor = (id: string, issueKey: string | null, name: string): ReleaseItem => {
     let it = items.get(id)
-    if (!it) { it = { id, issueKey, name, branches: [], inEnv: emptyEnv(), commitsAheadOfProd: null, basedOnEnv: false, needsCherryPick: false, commits: [], lastActivity: '', archived: archived.has(id), overrides: overrides[id] ?? {} }; items.set(id, it) }
+    if (!it) { it = { id, issueKey, name, branches: [], inEnv: emptyEnv(), commitsAheadOfProd: null, basedOnEnv: false, needsCherryPick: false, commits: [], lastActivity: '', archived: archived.has(id), overrides: overrides[id] ?? {}, linkedFrom: [] }; items.set(id, it) }
     return it
   }
   for (const b of byName.values()) {
     const base = b.name.replace(ENV_SUFFIX, '')
-    const issueKey = keyOf(base)
+    let issueKey = keyOf(base)
+    let linked: string | null = null
+    if (!issueKey) { const l = links[base.toLowerCase()]; if (l) { issueKey = t.normalizeKey(l); linked = base.toLowerCase() } }
     const it = itemFor(issueKey ?? base.toLowerCase(), issueKey, base)
+    if (linked && !it.linkedFrom.includes(linked)) it.linkedFrom.push(linked)
     it.branches.push(b)
     for (const e of cfg.environments) it.inEnv[e.id] ||= merged[e.id].has(b.ref)
     if (b.date > it.lastActivity) it.lastActivity = b.date
   }
-
 
   // commit-based pass: work on dev/stage that is not on prod, grouped by issue key (covers deleted branches)
   const envLog = async (ref: string | null): Promise<Commit[]> => {
@@ -266,22 +452,19 @@ export async function analyze(repo: string): Promise<ReleaseAnalysis> {
     it.basedOnEnv = it.branches.every((b) => b.basedOnEnv)
   }))
 
-  // tracker enrichment (best effort)
-  const keys = [...items.values()].map((it) => it.issueKey).filter((k): k is string => !!k)
-  if (keys.length && t.isConfigured()) {
-    try { const issues = await t.getIssues(keys); for (const i of issues) { const it = items.get(i.key); if (it) it.issue = i } } catch { /* shown via trackerStatus */ }
-  }
-
-  const head = await run(repo, ['rev-parse', '--abbrev-ref', 'HEAD'], true)
-  const rerere = (await run(repo, ['config', '--get', 'rerere.enabled'], true)).stdout.trim() === 'true'
   const list = [...items.values()].sort((a, b) => (a.lastActivity < b.lastActivity ? 1 : -1))
-  return { config: cfg, refs, items: list, releaseBranches: releaseBranches.sort((a, b) => (a.date > b.date ? -1 : 1)), currentBranch: head.code === 0 ? head.stdout.trim() : null, rerere }
+  const sortedReleases = releaseBranches.sort((a, b) => (a.date > b.date ? -1 : 1))
+  try { writeJson(cacheFile, { key: cacheKey, at: Date.now(), analysis: { config: cfg, refs, items: list, releaseBranches: sortedReleases } } satisfies AnalysisCacheEntry) } catch { /* cache is best effort */ }
+  await enrich(list, t, opts.cache === false)
+  return { config: cfg, refs, items: list, releaseBranches: sortedReleases, currentBranch, rerere, fromCache: false }
 }
 
 // ---------- operations ----------
 
 export async function enableRerere(repo: string): Promise<void> { await run(repo, ['config', 'rerere.enabled', 'true']) }
 
+/** Check out an environment branch (creating a tracking branch when needed) and fast-forward it to the remote. */
+export async function checkoutEnvBranch(repo: string, cfg: EnvConfig, name: string): Promise<void> { return checkoutEnv(repo, cfg, name) }
 async function checkoutEnv(repo: string, cfg: EnvConfig, name: string): Promise<void> {
   const st = await git.status(repo)
   if (st.files.some((f) => f.area !== 'untracked')) throw new Error('Working tree has uncommitted changes. Commit or stash them first.')
@@ -291,8 +474,6 @@ async function checkoutEnv(repo: string, cfg: EnvConfig, name: string): Promise<
   const hasRemote = (await run(repo, ['rev-parse', '--verify', '-q', `refs/remotes/${cfg.remote}/${name}`], true)).code === 0
   if (hasRemote) await run(repo, ['merge', '--ff-only', `${cfg.remote}/${name}`])
 }
-
-export interface PromoteInput { id: string; ref: string | null; commits: string[] }
 
 /** Merge each item (feature branch, or cherry-pick its commits) into the current branch; stop at the first conflict. */
 async function applyItems(repo: string, items: PromoteInput[], target: string): Promise<PromoteResult> {
@@ -468,6 +649,15 @@ async function backMerge(repo: string, cfg: EnvConfig, from: Environment, push: 
   return res
 }
 
+/** Propagate an environment into every environment before it (used when a release into it is finished). */
+export async function syncFrom(repo: string, envId: string, push: boolean): Promise<PromoteResult> {
+  const cfg = await releaseConfig(repo)
+  const env = envById(cfg, envId)
+  if (cfg.environments.indexOf(env) === 0) return { merged: [], conflict: null, skipped: [], message: `${env.branch} is the first environment; nothing to back-merge` }
+  const res = await backMerge(repo, cfg, env, push)
+  res.message ||= res.merged.length ? `Synced: ${res.merged.join(', ')}${push ? ' (pushed)' : ''}` : `Nothing to sync${res.skipped.length ? ` (${res.skipped.join(', ')})` : ''}`
+  return res
+}
 export async function syncEnvironments(repo: string, push: boolean): Promise<PromoteResult> {
   const cfg = await releaseConfig(repo)
   const res = await backMerge(repo, cfg, lastEnv(cfg), push)

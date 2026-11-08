@@ -12,6 +12,10 @@ import { Output } from './panels/output'
 import { RebaseDialog } from './panels/rebase-dialog'
 import { SettingsDialog } from './panels/settings-dialog'
 import { Release } from './panels/release'
+import { OrganizationView } from './panels/organization'
+import { OrgConfigDialog } from './panels/org-config-dialog'
+import { NewOrgDialog } from './panels/new-org-dialog'
+import { QuickOpen } from './panels/quick-open'
 import { Split } from './ui/split'
 import { Dialog } from './ui/dialog'
 import { Toasts } from './ui/toasts'
@@ -19,11 +23,11 @@ import { ContextMenu } from './ui/context-menu'
 
 @Component({
   selector: 'pg-app',
-  imports: [Toolbar, Repositories, Branches, Files, Changes, Commit, Log, CommitDetails, Output, RebaseDialog, SettingsDialog, Release, Split, Dialog, Toasts, ContextMenu],
+  imports: [Toolbar, Repositories, Branches, Files, Changes, Commit, Log, CommitDetails, Output, RebaseDialog, SettingsDialog, Release, OrganizationView, OrgConfigDialog, NewOrgDialog, QuickOpen, Split, Dialog, Toasts, ContextMenu],
   template: `
     <div class="app">
       <pg-toolbar />
-      @if (!store.repo()) {
+      @if (!store.repo() && store.perspective() !== 'organization') {
         <div class="welcome">
           <img src="logo.svg" alt="" width="96" height="96" style="border-radius:22px" />
           <h1>PakGit</h1>
@@ -43,7 +47,8 @@ import { ContextMenu } from './ui/context-menu'
               <pg-branches second />
             </pg-split>
             <ng-container second>
-              @switch (store.perspective()) {
+              @if (!store.repo() && store.perspective() === 'organization') { <pg-organization /> }
+              @else { @switch (store.perspective()) {
                 @case ('log') {
                   <pg-split dir="h" [initial]="700" storageKey="log-main" [min]="300">
                     <pg-log first />
@@ -54,6 +59,7 @@ import { ContextMenu } from './ui/context-menu'
                   </pg-split>
                 }
                 @case ('release') { <pg-release /> }
+                @case ('organization') { <pg-organization /> }
                 @case ('worktree') {
                   <pg-split dir="h" [initial]="420" storageKey="wt-main" [min]="200">
                     <pg-split first dir="v" [initial]="520" storageKey="wt-left" [min]="120">
@@ -81,12 +87,12 @@ import { ContextMenu } from './ui/context-menu'
                     </pg-split>
                   </pg-split>
                 }
-              }
+              } }
             </ng-container>
           </pg-split>
         </div>
         <div class="statusbar">
-          <span>{{ store.repo()!.path }}</span>
+          <span>{{ store.repo()?.path ?? store.org()?.name ?? '' }}</span>
           @if (store.status(); as st) { <span>{{ st.files.length }} changed · ↑{{ st.ahead }} ↓{{ st.behind }}</span> }
           @if (store.error()) { <span style="color:var(--danger)">{{ store.error() }}</span> }
           <span style="flex:1"></span>
@@ -97,6 +103,9 @@ import { ContextMenu } from './ui/context-menu'
       <pg-dialog />
       <pg-rebase-dialog />
       <pg-settings-dialog />
+      <pg-org-config-dialog />
+      <pg-new-org-dialog />
+      <pg-quick-open />
       <pg-context-menu />
       <pg-toasts />
     </div>`
@@ -113,6 +122,9 @@ export class App {
       'local:empty-commit': a.emptyCommit, 'repo:apply-patch': a.applyPatch, 'repo:clean': a.clean,
       'view:standard': () => s.perspective.set('standard'), 'view:log': () => s.perspective.set('log'), 'view:worktree': () => s.perspective.set('worktree'),
       'view:release': () => s.perspective.set('release'),
+      'view:organization': () => s.perspective.set('organization'),
+      'org:switch': () => s.perspective.set('organization'),
+      'view:quick-open': () => s.showQuickOpen.set(true),
       'view:theme': () => s.toggleTheme(), 'view:settings': () => s.showSettings.set(true)
     }
     window.pakgitMenu.on((action) => void map[action]?.())

@@ -1,4 +1,4 @@
-import type { TrackerId, TrackerIssue, TrackerSettings, TrackerStatus } from '@shared/types'
+import type { IssuePage, IssueQuery, TrackerId, TrackerIssue, TrackerSettings, TrackerStatus, TrackerTeam } from '@shared/types'
 
 /** Pluggable issue-tracker provider. Implement this for Jira, GitHub Issues, etc. */
 export interface TrackerProvider {
@@ -12,12 +12,20 @@ export interface TrackerProvider {
   status(): Promise<TrackerStatus>
   getIssues(keys: string[]): Promise<TrackerIssue[]>
   myActiveIssues(): Promise<TrackerIssue[]>
+  /** issues matching the Work tab filters, newest activity first, paged */
+  listIssues(q: IssueQuery): Promise<IssuePage>
+  teams(): Promise<TrackerTeam[]>
   states(key: string): Promise<string[]>
   setState(key: string, stateName: string): Promise<void>
+  assignToMe(key: string): Promise<void>
   /** normalise a key found in text to the canonical form, e.g. cyb4-12 -> CYB4-12 */
   normalizeKey(key: string): string
   /** issue-key prefixes known to the tracker (Linear team keys); empty when unknown */
   keyPrefixes(): Promise<string[]>
+  /** drop cached issues (all when no keys are given) so the next getIssues re-fetches them */
+  invalidate?(keys?: string[]): void
+  /** attach a pull request to the issue (optional capability) */
+  attachPullRequest?(key: string, url: string, title?: string): Promise<void>
 }
 
 export class NoTracker implements TrackerProvider {
@@ -28,8 +36,11 @@ export class NoTracker implements TrackerProvider {
   async status(): Promise<TrackerStatus> { return { provider: 'none', configured: false } }
   async getIssues(): Promise<TrackerIssue[]> { return [] }
   async myActiveIssues(): Promise<TrackerIssue[]> { return [] }
+  async listIssues(): Promise<IssuePage> { return { issues: [], nextCursor: null } }
+  async teams(): Promise<TrackerTeam[]> { return [] }
   async states(): Promise<string[]> { return [] }
   async setState(): Promise<void> { throw new Error('No issue tracker configured') }
+  async assignToMe(): Promise<void> { throw new Error('No issue tracker configured') }
   normalizeKey(key: string): string { return key.toUpperCase() }
   async keyPrefixes(): Promise<string[]> { return [] }
 }

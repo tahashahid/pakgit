@@ -1,7 +1,10 @@
 import { Injectable, computed, effect, signal } from '@angular/core'
-import type { BlameLine, Commit, CommitDetails, FileEntry, GitLogLine, RebaseTodoEntry, Refs, ReleaseAnalysis, RepoEntry, RepoStatus, Settings, StashInfo, SubmoduleInfo, TrackerStatus, WorktreeInfo } from '@shared/types'
+import type { BlameLine, Commit, CommitDetails, ConfigSyncState, FileEntry, GitLogLine, HostingStatus, NextRelease, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, ReleaseRecord, ReleaseSelection, RepoEntry, RepoStatus, SavedView, Settings, StashInfo, SubmoduleInfo, TrackerStatus, TrackerTeam, WorkIndex, WorkspaceState, WorktreeInfo } from '@shared/types'
 
-export type Perspective = 'standard' | 'log' | 'worktree' | 'release'
+export type Perspective = 'standard' | 'log' | 'worktree' | 'release' | 'organization'
+export type OrgTab = 'overview' | 'work' | 'ready' | 'releases'
+/** what the Release dialog opens with: the selected parts plus display names */
+export type ReleaseDraft = (ReleaseSelection & { repoName: string })[]
 export type Theme = 'light' | 'dark'
 export interface Toast { id: number; kind: 'error' | 'info' | 'success'; text: string }
 export interface DialogField { key: string; label: string; value?: string; type?: 'text' | 'textarea' | 'checkbox' | 'select'; options?: string[]; placeholder?: string }
@@ -51,6 +54,52 @@ export class Store {
   readonly release = signal<ReleaseAnalysis | null>(null)
   readonly releaseLoading = signal(false)
   readonly trackerStatus = signal<TrackerStatus | null>(null)
+  // organizations
+  readonly workspace = signal<WorkspaceState | null>(null)
+  readonly org = signal<Organization | null>(null)
+  readonly activeOrgId = computed(() => this.workspace()?.active ?? 'personal')
+  readonly showOrgConfig = signal<string | null>(null)
+  readonly showNewOrg = signal(false)
+  readonly overview = signal<OrgOverview | null>(null)
+  readonly overviewLoading = signal(false)
+  // phase 2: the cross-repository index, the Organization tabs and Quick open
+  readonly index = signal<WorkIndex | null>(null)
+  readonly indexLoading = signal(false)
+  readonly indexError = signal<string | null>(null)
+  readonly overviewError = signal<string | null>(null)
+  readonly orgTab = signal<OrgTab>(LS.get<OrgTab>('orgTab', 'overview'))
+  /** group chip in the Organization view; null = all groups */
+  readonly orgGroup = signal<string | null>(null)
+  readonly showQuickOpen = signal(false)
+  /** Quick open ▸ issue: the Work tab filters to this key once */
+  readonly workFocusKey = signal<string | null>(null)
+  /** Overview ▸ "partly promoted": the Ready tab shows only warnings once */
+  readonly readyWarnOnly = signal(false)
+  /** Ready tab: environment id, 'unreleased', 'released' or 'archived' ('' = not chosen yet) and its text filter */
+  readonly readyTab = signal<string>('')
+  readonly readyText = signal('')
+  /** Ready ▸ Promote / open: item ids to tick and the item to select when the Release view opens */
+  readonly releasePreselect = signal<{ check: string[]; focus: string | null } | null>(null)
+  readonly trackerTeams = signal<TrackerTeam[]>([])
+  // phase 3: releases, hosting
+  readonly releases = signal<ReleaseRecord[]>([])
+  readonly releasesLoading = signal(false)
+  readonly hostingStatus = signal<HostingStatus | null>(null)
+  /** Ready ▸ Promote selected…: the Release dialog is open with this selection */
+  readonly releaseDraft = signal<ReleaseDraft | null>(null)
+  /** release id to highlight in the Releases tab once */
+  readonly releaseFocus = signal<string | null>(null)
+  readonly inProgressReleases = computed(() => this.releases().filter((r) => r.status === 'in-progress').length)
+  // phase 4: shared configuration, calendar, cleanup, saved views
+  readonly configSync = signal<ConfigSyncState | null>(null)
+  readonly configSyncLoading = signal(false)
+  /** the diff dialog for the configuration repository is open */
+  readonly showConfigDiff = signal(false)
+  readonly configDismissed = signal<string | null>(null)
+  readonly nextReleases = signal<NextRelease[]>([])
+  readonly showCleanup = signal(false)
+  /** a saved view the Work or Ready tab should apply once */
+  readonly applyView = signal<SavedView | null>(null)
 
   readonly effectiveLogLimit = computed(() => this.logLimit() || this.settings()?.logLimit || 400)
   readonly singleFile = computed(() => (this.selectedFiles().length === 1 ? this.selectedFiles()[0] : null))
@@ -62,6 +111,7 @@ export class Store {
   constructor() {
     effect(() => { document.documentElement.dataset['theme'] = this.theme(); LS.set('theme', this.theme()) })
     effect(() => LS.set('perspective', this.perspective()))
+    effect(() => LS.set('orgTab', this.orgTab()))
     effect(() => LS.set('logAll', this.logAll()))
     // reload the log when its filters change
     effect(() => { this.logAll(); this.logPath(); this.logLimit(); void this.refresh() })
@@ -82,6 +132,7 @@ export class Store {
     })
 
     this.api.getSettings().then((s) => this.settings.set(s)).catch(() => undefined)
+    void this.loadWorkspace()
     this.api.gitVersion().then((v) => this.gitVersion.set(v)).catch(() => this.gitVersion.set('git not found'))
     this.reloadRepos().then((list) => {
       const last = LS.get<string | null>('lastRepo', null)
@@ -90,8 +141,16 @@ export class Store {
     })
     this.api.getGitLog().then((l) => this.output.set(l))
     this.api.onGitLog((line) => this.output.update((o) => [...o.slice(-499), line]))
-    this.api.onRepoChanged((p) => { if (this.repo()?.path === p) void this.refresh() })
+    this.api.onRepoChanged((p) => {
+      if (this.repo()?.path === p) void this.refresh()
+      // keep the organization index current while it is on screen (the analysis cache makes this cheap)
+      if (this.perspective() === 'organization' && this.index() && this.repos().some((r) => r.path === p)) {
+        clearTimeout(this.indexTimer ?? undefined)
+        this.indexTimer = setTimeout(() => { void this.loadIndex() }, 1500)
+      }
+    })
   }
+  private indexTimer: ReturnType<typeof setTimeout> | null = null
 
   toast(kind: Toast['kind'], text: string): void {
     const id = ++this.toastId
@@ -135,13 +194,88 @@ export class Store {
     }
   }
 
-  async analyzeRelease(): Promise<void> {
+  async analyzeRelease(refresh = false): Promise<void> {
     const r = this.repo(); if (!r) { this.release.set(null); return }
     this.releaseLoading.set(true)
-    try { this.release.set(await this.api.releaseAnalyze(r.path)) } catch (e) { this.toast('error', `Release analysis: ${e instanceof Error ? e.message : String(e)}`) }
+    try { const a = await this.api.releaseAnalyze(r.path, { refresh }); if (this.repo()?.path === r.path) this.release.set(a) } catch (e) { this.toast('error', `Release analysis: ${e instanceof Error ? e.message : String(e)}`) }
     finally { this.releaseLoading.set(false) }
   }
   async refreshTracker(): Promise<void> { try { this.trackerStatus.set(await this.api.trackerStatus()) } catch { this.trackerStatus.set(null) } }
+
+  // ---- organizations
+  async loadWorkspace(): Promise<void> {
+    try { const w = await this.api.workspace(); this.workspace.set(w); this.org.set(await this.api.orgGet(w.active)); void this.firstRunHint(w) } catch { /* pre-organization main process */ }
+  }
+  /** Once: when only Personal exists and several repositories share a hosting owner, suggest an organization. */
+  private async firstRunHint(w: WorkspaceState): Promise<void> {
+    if (w.organizations.length > 1 || LS.get('orgHintShown', false)) return
+    try {
+      const p = (await this.api.orgProposals()).find((x) => x.repos.length >= 2)
+      if (!p) return
+      LS.set('orgHintShown', true)
+      this.toast('info', `${p.repos.length} repositories share the owner "${p.owner}". Create an organization for them: Repositories ▸ Personal ▸ New organization…`)
+    } catch { /* ignore */ }
+  }
+  async switchOrg(id: string): Promise<void> {
+    if (id === this.activeOrgId()) return
+    this.workspace.set(await this.api.orgSetActive(id)); this.org.set(await this.api.orgGet(id))
+    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null); this.index.set(null); this.trackerTeams.set([]); this.orgGroup.set(null); this.indexError.set(null); this.overviewError.set(null); this.readyTab.set(''); this.readyText.set(''); this.releases.set([]); this.hostingStatus.set(null); this.configSync.set(null); this.nextReleases.set([]); this.configDismissed.set(null)
+    const list = await this.reloadRepos()
+    const last = LS.get<Record<string, string>>('lastRepoByOrg', {})[id]
+    const entry = list.find((r) => r.path === last) ?? list[0] ?? null
+    if (entry) this.openRepo(entry); else { this.repo.set(null); await this.refresh() }
+    void this.refreshTracker()
+    if (this.perspective() === 'organization') void this.loadOverview()
+  }
+  async reloadOrg(): Promise<void> { const w = await this.api.workspace(); this.workspace.set(w); this.org.set(await this.api.orgGet(w.active)); await this.reloadRepos() }
+  async loadOverview(refresh = false): Promise<void> {
+    const id = this.activeOrgId(); this.overviewLoading.set(true)
+    try { const ov = await this.api.orgOverview(id, { refresh }); if (this.activeOrgId() === id) { this.overview.set(ov); this.overviewError.set(null) } }
+    catch (e) { const msg = e instanceof Error ? e.message : String(e); this.overviewError.set(msg); this.toast('error', `Overview: ${msg}`) } finally { this.overviewLoading.set(false) }
+  }
+  private indexPending: Promise<WorkIndex | null> | null = null
+  /** Load (or re-check) the work-item index of the active organization; concurrent calls share one request. */
+  loadIndex(refresh = false): Promise<WorkIndex | null> {
+    if (this.indexPending && !refresh) return this.indexPending
+    const id = this.activeOrgId(); this.indexLoading.set(true)
+    let p: Promise<WorkIndex | null> | null = null
+    p = (async () => {
+      try { const idx = await this.api.orgIndex(id, { refresh }); if (this.activeOrgId() === id) { this.index.set(idx); this.indexError.set(null) } return idx }
+      catch (e) { const msg = e instanceof Error ? e.message : String(e); this.indexError.set(msg); this.toast('error', `Index: ${msg}`); return null }
+      finally { if (this.indexPending === p) { this.indexPending = null; this.indexLoading.set(false) } }
+    })()
+    this.indexPending = p
+    return p
+  }
+  async loadTrackerTeams(): Promise<void> { try { this.trackerTeams.set(await this.api.trackerTeams()) } catch { this.trackerTeams.set([]) } }
+  async loadReleases(): Promise<void> {
+    const id = this.activeOrgId(); this.releasesLoading.set(true)
+    try { const list = await this.api.orgReleases(id); if (this.activeOrgId() === id) this.releases.set(list) } catch (e) { this.toast('error', `Releases: ${e instanceof Error ? e.message : String(e)}`) } finally { this.releasesLoading.set(false) }
+  }
+  async refreshHosting(): Promise<void> { try { this.hostingStatus.set(await this.api.orgHostingStatus(this.activeOrgId())) } catch { this.hostingStatus.set(null) } }
+  /** after a release changed: records, index and overview */
+  async afterRelease(): Promise<void> { await Promise.all([this.loadReleases(), this.loadIndex(), this.loadOverview()]) }
+  async loadConfigSync(fresh = false): Promise<ConfigSyncState | null> {
+    const id = this.activeOrgId(); this.configSyncLoading.set(true)
+    try { const st = await this.api.orgConfigSync(id, fresh); if (this.activeOrgId() === id) this.configSync.set(st); return st }
+    catch (e) { this.toast('error', `Shared configuration: ${e instanceof Error ? e.message : String(e)}`); return null } finally { this.configSyncLoading.set(false) }
+  }
+  async loadNextReleases(): Promise<void> { try { this.nextReleases.set(await this.api.orgNextReleases(this.activeOrgId())) } catch { this.nextReleases.set([]) } }
+  async saveView(view: Omit<SavedView, 'id'> & { id?: string }): Promise<void> {
+    const org = this.org(); if (!org) return
+    const id = view.id ?? Math.random().toString(36).slice(2, 10)
+    const views = org.views.filter((v) => v.id !== id && !(v.tab === view.tab && v.name.toLowerCase() === view.name.toLowerCase()))
+    this.org.set(await this.api.orgUpdate(org.id, { views: [...views, { ...view, id }] }))
+    this.toast('success', `View "${view.name}" saved`)
+  }
+  async deleteView(viewId: string): Promise<void> { const org = this.org(); if (!org) return; this.org.set(await this.api.orgUpdate(org.id, { views: org.views.filter((v) => v.id !== viewId) })) }
+  /** Open a repository of the active organization in the Release view, ticking and selecting items there. */
+  openInRelease(path: string, check: string[], focus: string | null): void {
+    const entry = this.repos().find((r) => r.path === path); if (!entry) return
+    if (this.repo()?.path !== path) this.openRepo(entry)
+    this.releasePreselect.set({ check, focus })
+    this.perspective.set('release')
+  }
 
   openRepo(entry: RepoEntry): void {
     this.release.set(null)
@@ -149,12 +283,14 @@ export class Store {
     this.logPath.set(null); this.logLimit.set(0)
     this.repo.set(entry)
     LS.set('lastRepo', entry.path)
+    LS.set('lastRepoByOrg', { ...LS.get<Record<string, string>>('lastRepoByOrg', {}), [this.activeOrgId()]: entry.path })
     void this.refresh()
   }
   /** Reload the repository list and groups from disk. */
   async reloadRepos(): Promise<RepoEntry[]> {
     const [list, groups] = await Promise.all([this.api.listRepos(), this.api.listGroups().catch(() => [])])
     this.repos.set(list); this.groups.set(groups)
+    this.api.workspace().then((w) => this.workspace.set(w)).catch(() => undefined)
     return list
   }
   async addRepo(path?: string, group?: string | null): Promise<void> {

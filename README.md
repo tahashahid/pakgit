@@ -32,6 +32,35 @@ See [ANALYSIS.md](ANALYSIS.md) for the SmartGit feature analysis this design is 
   PRs; start work on a Linear issue from main. The process is documented in
   [docs/WORKFLOW.md](docs/WORKFLOW.md). Issue trackers are pluggable (`src/main/tracker/`);
   Linear is the first provider. Pull-request pages are built for GitHub, GitLab and Bitbucket.
+- **Organizations** (phases 1–2 of [docs/ORGANIZATIONS.md](docs/ORGANIZATIONS.md)): repositories,
+  groups, a shared pipeline template that repositories inherit and override, conventions and the
+  issue-tracker connection live per organization; a Personal organization holds everything else.
+  Organization overview with per-repository health (ready counts, drift, dev-based branches,
+  unmerged release branches, issues partly promoted across repositories); new-organization
+  wizard from the repositories' hosting owner; export/import of an organization file (remote
+  URLs only, no secrets)
+- **Releases across repositories** (phase 3): *Promote selected…* in the Ready tab runs the
+  pre-flight checks (tracker state, partly promoted, dev-based, freeze, previous environment;
+  each off / warn / block per environment), creates one branch name in every repository
+  involved in deploy order, opens one pull request per repository on GitHub (through the gh
+  CLI or a token; compare-page links elsewhere) and records a release. The Releases tab shows
+  each repository's pull request (state, checks, review), whether it landed, a pause on a
+  conflict with Resume, Finish (back-merge + Linear states) and release notes. Environments
+  can be frozen; deployed-version probes (HTTP JSON, HTTP text, git tag) show what each
+  environment runs
+- **Sharing and ecosystem** (phase 4): a configuration repository keeps the organization file
+  in git (check, review the diff, apply, push back); saved views as chips on Work and Ready;
+  Slack notifications on release events; Revert release (revert branch + pull request per
+  repository); Clean up merged branches; a release calendar with a countdown on the Overview;
+  Jira Cloud as a second issue tracker
+- **Planning across repositories**: a work-item index merges every repository's release
+  analysis by issue key. *Work* tab: tracker issues × repositories with team, status, assignee,
+  cycle and date filters, start work in several repositories at once, link a branch that follows
+  no convention, set status, assign to me. *Ready* tab: the release table in organization scope
+  with a Repository column, group chips and partly-promoted warnings; the per-repository Release
+  view shows where else an issue lives. Quick open (Cmd/Ctrl+K) jumps to a repository, a branch
+  in any repository, an issue or a release. Analyses are cached per repository and keyed on the
+  branch tips; per-repository state follows the remote URL, so a re-clone keeps it
 - Repository groups; branches and tags shown as folders by `/` prefix
 - Repository menu: apply patch, clean working tree
 - **Settings**: git executable, default pull strategy, background fetch interval, log size,
@@ -57,7 +86,8 @@ one component at a time:
 
 ## Connecting Linear
 
-PakGit talks to Linear directly. Two options in Settings ▸ Issue tracker:
+PakGit talks to Linear directly. The connection belongs to an organization (Organization ▸
+Configure… ▸ Integrations); the Personal organization has one too. Two options:
 
 1. **Sign in with Linear** (recommended). Someone in the workspace creates an OAuth application
    once in Linear ▸ Settings ▸ API ▸ OAuth applications with the callback URL
@@ -102,6 +132,8 @@ src/shared/    types shared between processes
 
 ## Roadmap
 
+- Organizations, later: Linear Releases sync, GitLab / Bitbucket pull-request state, GitHub
+  Issues as a tracker, a headless mode for CI (docs/ORGANIZATIONS.md)
 - Hosting providers (GitHub / GitLab / Bitbucket / Azure DevOps): pull requests, reviews
 - Three-way merge editor (today: take ours / theirs, or edit externally and mark resolved)
 - Split commit in interactive rebase; rebase across merge commits

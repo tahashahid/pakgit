@@ -27,7 +27,11 @@ const PATHS: Record<string, string> = {
   worktree: 'M3 20h18M6 20V9l6-5 6 5v11M10 20v-6h4v6',
   clone: 'M4 4h12v12H4zM8 8h12v12H8z',
   'folder-plus': 'M3 6h6l2 2h10v10H3zM12 10v6M9 13h6',
-  'folder-open': 'M3 7h6l2 2h10l-2 9H3zM3 7v11'
+  'folder-open': 'M3 7h6l2 2h10l-2 9H3zM3 7v11',
+  search: 'M10.5 4a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM20 20l-4.6-4.6',
+  link: 'M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1.5 1.5M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1.5-1.5',
+  play: 'M7 4l12 8-12 8z',
+  warning: 'M12 3l10 18H2zM12 10v5M12 18h.01'
 }
 
 @Component({

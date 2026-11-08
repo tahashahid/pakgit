@@ -23,10 +23,16 @@ type Tab = string
         @for (e of envs(); track e.id; let last = $last) { <span class="env-chip" [title]="e.strategy === 'release-branch' ? 'release branch + pull request' : e.strategy === 'feature-pr' ? 'one pull request per feature branch' : 'direct merge, no pull request'">{{ e.name || e.branch }} <span class="mono muted">{{ e.branch }}</span></span>@if (!last) { <span class="muted">→</span> } }
         <button class="btn small" (click)="showConfig.set(true)" title="Configure environments, branches and promotion strategy">Configure…</button>
         <button class="btn small" title="Fetch all remotes, then re-analyse" (click)="fetchAndAnalyze()" [disabled]="store.releaseLoading()"><pg-icon name="fetch" [size]="14" />Fetch</button>
-        <button class="btn small" title="Re-analyse" (click)="store.analyzeRelease()" [disabled]="store.releaseLoading()"><pg-icon name="refresh" [size]="14" /></button>
+        <button class="btn small" title="Re-analyse (bypasses the cache)" (click)="store.analyzeRelease(true)" [disabled]="store.releaseLoading()"><pg-icon name="refresh" [size]="14" /></button>
+        @if (store.repos().length > 1) {
+          <div class="seg" style="margin:0" title="Scope: this repository, or every repository of the organization in one table">
+            <button class="btn small active">This repo</button>
+            <button class="btn small" (click)="goOrganization()">Organization</button>
+          </div>
+        }
         <span style="flex:1"></span>
         @if (store.trackerStatus(); as ts) {
-          @if (ts.provider === 'none' || !ts.configured) { <button class="btn small ghost" (click)="store.showSettings.set(true)" title="Connect Linear in Settings">Linear: not connected</button> }
+          @if (ts.provider === 'none' || !ts.configured) { <button class="btn small ghost" (click)="store.showOrgConfig.set('integrations')" title="Connect Linear under Organization ▸ Configure ▸ Integrations">Linear: not connected</button> }
           @else if (ts.error) { <span class="chip bad" [title]="ts.error">Linear: error</span> }
           @else { <span class="chip ok" [title]="ts.account">Linear ✓</span> }
         }
@@ -40,7 +46,7 @@ type Tab = string
         <div class="release-help">
           <b>One branch per issue, cut from <code>{{ baseEnv()?.branch }}</code>, merged as-is into every environment.</b>
           <ol>
-            <li><b>Start</b>: "Start work on issue…" creates the branch from <code>{{ baseEnv()?.branch }}</code>{{ store.settings()?.tracker?.stateOnStart ? ' (tracker → ' + store.settings()!.tracker.stateOnStart + ')' : '' }}.</li>
+            <li><b>Start</b>: "Start work on issue…" creates the branch from <code>{{ baseEnv()?.branch }}</code>{{ store.org()?.tracker?.stateOnStart ? ' (tracker → ' + store.org()!.tracker.stateOnStart + ')' : '' }}.</li>
             @for (e of envs(); track e.id; let i = $index; let first = $first) {
               <li><b>{{ e.name || e.branch }}</b> (<code>{{ e.branch }}</code>):
                 @if (e.strategy === 'feature-pr') { tab <i>To {{ e.name || e.branch }}</i>: tick items and "Open pull requests" opens one PR per feature branch into <code>{{ e.branch }}</code>. Merge with a merge commit (no squash). Resolve conflicts once; rerere replays them later. }
@@ -103,9 +109,11 @@ type Tab = string
                       <td [title]="it.issue?.title ?? it.name">
                         @if (it.issueKey) { <span class="ref-pill issue">{{ it.issueKey }}</span> }
                         @if (it.issue) { <span class="status-pill" [class]="'status-pill ' + it.issue.statusType" style="margin:0 6px 0 0">{{ it.issue.status }}</span> }
+                        @if (elsewhere()[it.id]; as others) { <span class="status-pill" [class.unknown]="others.warn" style="margin:0 6px 0 0;cursor:pointer" [title]="others.title + '\nClick to open the Ready tab of the organization.'" (click)="$event.stopPropagation(); goOrganization(it.issueKey)">{{ others.warn ? '⚠ ' : '' }}+{{ others.n }} repo{{ others.n > 1 ? 's' : '' }}</span> }
                         {{ it.issue?.title ?? it.name }}
                         @if (it.needsCherryPick) { <span class="status-pill unknown" title="No branch left for this work; promotion will cherry-pick its commits">cherry-pick</span> }
                         @if (it.basedOnEnv) { <span class="status-pill canceled" title="This branch was cut from dev/stage, so it carries other unreleased work. Promoting it alone is not possible; recreate it from main (git rebase --onto main) before promoting.">branched from dev</span> }
+                        @if (it.linkedFrom.length) { <span class="status-pill" title="A branch without an issue key was linked to this issue by hand">linked</span> }
                       </td>
                       <td [title]="branchTitle(it)"><span class="mono" style="font-size:11px">{{ it.branches[0]?.name ?? '—' }}</span>@if (it.branches.length > 1) { <span class="muted"> +{{ it.branches.length - 1 }}</span> }</td>
                       @for (e of envs(); track e.id) { <td class="env" [class.manual]="e.id in it.overrides" [title]="e.id in it.overrides ? 'Set manually (right-click ▸ Fix tracking)' : ''">{{ it.inEnv[e.id] ? '✓' : (e.id in it.overrides ? '✗' : '') }}{{ e.id in it.overrides ? '*' : '' }}</td> }
@@ -166,13 +174,13 @@ type Tab = string
       } @else { <div class="empty">Open a repository to plan a release.</div> }
 
       @if (showConfig()) { <pg-env-config-dialog [initial]="cfg()" (closed)="showConfig.set(false)" (saved)="configSaved($event)" /> }
-      @if (promoteItems(); as pi) { <pg-promote-dialog [items]="pi" [envs]="envs()" [initialEnv]="promoteEnvId()" [branchNames]="allBranchNames()" [releasePrefix]="cfg()?.releasePrefix ?? 'release/'" [cfgRemote]="cfg()?.remote ?? 'origin'" (closed)="promoteItems.set(null)" (submitted)="runPromote($event)" /> }
+      @if (promoteItems(); as pi) { <pg-promote-dialog [items]="pi" [envs]="envs()" [initialEnv]="promoteEnvId()" [branchNames]="allBranchNames()" [releasePrefix]="cfg()?.releasePrefix ?? 'release/'" [releasePattern]="store.org()?.conventions?.releasePattern ?? 'release/{env}-{week}'" [cfgRemote]="cfg()?.remote ?? 'origin'" (closed)="promoteItems.set(null)" (submitted)="runPromote($event)" /> }
 
       @if (issuePicker(); as issues) {
         <div class="modal-backdrop" (mousedown)="issuePicker.set(null)">
           <div class="modal wide" (mousedown)="$event.stopPropagation()">
             <h2>Start work on issue</h2>
-            <p class="modal-message">Creates a branch from {{ cfg()?.remote }}/{{ baseEnv()?.branch }} using Linear's branch name{{ updateTracker() ? ', and moves the issue to "' + (store.settings()?.tracker?.stateOnStart ?? 'In Progress') + '"' : '' }}.</p>
+            <p class="modal-message">Creates a branch from {{ cfg()?.remote }}/{{ baseEnv()?.branch }} using Linear's branch name{{ updateTracker() ? ', and moves the issue to "' + (store.org()?.tracker?.stateOnStart ?? 'In Progress') + '"' : '' }}.</p>
             <input class="filter-input" placeholder="Filter my issues…" [value]="issueFilter()" (input)="issueFilter.set($any($event.target).value)" />
             <ul class="list rebase-list" style="max-height:50vh">
               @for (i of filteredIssues(issues); track i.key) {
@@ -235,6 +243,20 @@ export class Release {
     effect(() => LS.set('release.push', this.push()))
     effect(() => LS.set('release.updateTracker', this.updateTracker()))
     effect(() => { if (this.store.repo() && !this.store.release() && !this.store.releaseLoading()) void this.store.analyzeRelease() })
+    // the organization index (cached per repository) tells each row where else the issue lives
+    effect(() => { if (this.store.repos().length > 1 && !this.store.index() && !this.store.indexLoading() && !this.store.indexError()) void this.store.loadIndex() })
+    // opened from the Ready tab: tick the chosen items and select the focused one once the analysis is in
+    effect(() => {
+      const p = this.store.releasePreselect(); const r = this.store.release(); if (!p || !r) return
+      const ids = new Set(r.items.map((i) => i.id))
+      this.checked.set(new Set(p.check.filter((id) => ids.has(id))))
+      const focus = p.focus ? r.items.find((i) => i.id === p.focus) ?? null : null
+      if (focus) this.selected.set(focus)
+      const first = r.items.find((i) => i.id === (p.focus ?? p.check[0]))
+      if (first) this.tab.set(first.archived ? 'archived' : this.isReleased(first) ? 'released' : 'unreleased')
+      this.clearFilters()
+      this.store.releasePreselect.set(null)
+    })
     // default tab: the first environment after the first one that has candidates, else 'unreleased'
     effect(() => { const envs = this.envs(); if (envs.length >= 2 && !envs.some((e) => e.id === this.tab()) && this.tab() === 'unreleased' && this.store.release()) this.tab.set(envs[1].id) })
     void this.store.refreshTracker()
@@ -304,6 +326,7 @@ export class Release {
       { label: 'Fix tracking… (which environments it is on)', onClick: () => void this.fixTracking(it) },
       ...(Object.keys(it.overrides).length ? [{ label: 'Reset tracking to detected', onClick: () => void this.resetTracking(it) }] : []),
       { separator: true, label: '' },
+      ...(it.issueKey ? (it.linkedFrom?.length ? [{ label: 'Unlink from issue', onClick: () => void this.unlink(it) }] : []) : [{ label: 'Link to issue…', onClick: () => void this.linkToIssue(it) }]),
       ...(it.issue ? [{ label: `Open ${it.issue.key} in Linear`, onClick: () => this.open(it.issue!.url) }] : []),
       ...(it.branches.length ? [{ label: 'Copy branch name', onClick: () => void navigator.clipboard.writeText(it.branches[0].name) }] : []),
       { separator: true, label: '' },
@@ -446,11 +469,33 @@ export class Release {
     this.issuePicker.set(null)
     await this.doStart(i.branchName || `${i.key.toLowerCase()}-${i.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}`, i.key)
   }
+  /** issue key -> parts of the same issue in the other repositories of the organization */
+  readonly elsewhere = computed<Record<string, { n: number; warn: boolean; title: string }>>(() => {
+    const idx = this.store.index(); const me = this.store.repo()?.path; const out: Record<string, { n: number; warn: boolean; title: string }> = {}
+    if (!idx || !me) return out
+    for (const it of idx.items) {
+      if (!it.issueKey) continue
+      const others = it.parts.filter((p) => p.repo !== me); if (!others.length || !it.parts.some((p) => p.repo === me)) continue
+      out[it.issueKey] = { n: others.length, warn: it.partlyPromoted, title: others.map((p) => `${p.repoName}: ${p.highest ? 'on ' + p.highest : p.archived ? 'archived' : 'not merged anywhere'}`).join('\n') + (it.partlyPromoted ? '\nParts sit on different environments.' : '') }
+    }
+    return out
+  })
+  goOrganization(key?: string | null): void { if (key) this.store.readyText.set(key); this.store.readyWarnOnly.set(false); this.store.orgTab.set('ready'); this.store.perspective.set('organization') }
+  async linkToIssue(it: ReleaseItem): Promise<void> {
+    const r = this.store.repo(); if (!r) return
+    const v = await this.store.prompt({ title: `Link ${it.name} to an issue`, okLabel: 'Link', message: 'The branch carries no issue key. Enter the issue it belongs to; PakGit remembers the link for this repository.', fields: [{ key: 'key', label: 'Issue key', placeholder: 'CYB4-123' }] })
+    if (!v || !String(v.key).trim()) return
+    try { await this.store.api.setLink(r.path, it.id, String(v.key).trim()); await this.store.analyzeRelease(); void this.store.loadIndex() } catch (e) { this.store.toast('error', e instanceof Error ? e.message : String(e)) }
+  }
+  async unlink(it: ReleaseItem): Promise<void> {
+    const r = this.store.repo(); if (!r) return
+    try { for (const id of it.linkedFrom) await this.store.api.setLink(r.path, id, null); await this.store.analyzeRelease(); void this.store.loadIndex() } catch (e) { this.store.toast('error', e instanceof Error ? e.message : String(e)) }
+  }
   private async doStart(branch: string, key: string | null): Promise<void> {
     const r = this.store.repo(); if (!r) return
     const res = await this.store.run('Start work', () => this.store.api.startIssue(r.path, key ?? '', branch), { success: `Created ${branch} from ${this.cfg()?.remote}/${this.baseEnv()?.branch}` })
     if (res !== undefined && key && this.updateTracker() && this.trackerOk()) {
-      const state = this.store.settings()?.tracker.stateOnStart
+      const state = this.store.org()?.tracker.stateOnStart
       if (state) await this.store.api.trackerSetState(key, state).catch((e) => this.store.toast('error', `Linear: ${e instanceof Error ? e.message : String(e)}`))
     }
     this.store.perspective.set('standard')

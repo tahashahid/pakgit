@@ -1,4 +1,4 @@
-const g = require('../out/test/git.cjs')
+const g = require('../out/test/backend.cjs').git
 const fs = require('fs'), path = require('path'), os = require('os')
 const assert = require('assert')
 ;(async () => {
