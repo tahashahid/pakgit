@@ -130,6 +130,16 @@ const COLORS = ['#0B6B3A', '#2563eb', '#7c3aed', '#db2777', '#d97706', '#0891b2'
                         <select (change)="setTracker({ authMethod: $any($event.target).value })"><option value="oauth" [selected]="o.tracker.authMethod === 'oauth'">Sign in with Linear (browser)</option><option value="apiKey" [selected]="o.tracker.authMethod === 'apiKey'">Personal API key</option></select></label>
                       @if (o.tracker.authMethod === 'apiKey') {
                         <label class="field"><span>Linear personal API key</span><input type="password" [value]="apiKey()" placeholder="lin_api_… (leave empty to keep the stored key)" (input)="apiKey.set($any($event.target).value)" /><small class="hint">Linear ▸ Settings ▸ Security &amp; access. {{ ts()?.hasApiKey ? 'A key is stored.' : 'No key stored yet.' }}</small></label>
+                        <div class="field"><span>Connection</span>
+                          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                            @if (ts(); as t) {
+                              @if (t.configured && !t.error) { <span class="chip ok">Connected{{ t.account ? ' as ' + t.account : '' }}</span> }
+                              @else if (t.error) { <span class="chip bad" [title]="t.error">{{ t.error }}</span> }
+                              @else { <span class="muted">{{ t.hasApiKey ? 'checking…' : 'enter a key and save' }}</span> }
+                            } @else { <span class="spinner"></span> }
+                            <button type="button" class="btn small ghost" (click)="recheckTracker()">Check</button>
+                          </div>
+                          <small class="hint">Checked with the stored key; save a new key first to check it.</small></div>
                       } @else {
                         <label class="field"><span>OAuth client ID</span><input [value]="o.tracker.linearClientId" placeholder="from your Linear OAuth application" (input)="setTracker({ linearClientId: $any($event.target).value })" /><small class="hint">Created once per workspace in Linear ▸ Settings ▸ API ▸ OAuth applications. Callback URL <code>{{ redirect() }}</code>.</small></label>
                         <div class="field"><span>Connection</span>
@@ -271,6 +281,7 @@ export class OrgConfigDialog {
     this.store.api.trackerRedirectUrl().then((u) => this.redirect.set(u)).catch(() => undefined)
   }
   private async refreshTracker(id: string): Promise<void> { try { this.ts.set(await this.store.api.orgTrackerStatus(id)) } catch { this.ts.set(null) } }
+  async recheckTracker(): Promise<void> { const d = this.draft(); if (!d) return; this.ts.set(null); await this.refreshTracker(d.id); await this.store.refreshTracker() }
   set(patch: Partial<Organization>): void { this.draft.update((d) => (d ? { ...d, ...patch } : d)) }
   setHosting(patch: Partial<HostingConfig>): void { this.draft.update((d) => (d ? { ...d, hosting: { ...d.hosting, ...patch } } : d)) }
   setSlack(patch: Partial<Organization['notifications']['slack']>): void { this.draft.update((d) => (d ? { ...d, notifications: { ...d.notifications, slack: { ...d.notifications.slack, ...patch } } } : d)) }

@@ -43,7 +43,8 @@ export async function readProbe(repo: string, p: Probe): Promise<string> {
   }
   if (p.type === 'git-tag') {
     const re = globToRe(p.tagPattern ?? 'deployed/*')
-    const r = await git.run(['for-each-ref', '--sort=-creatordate', '--format=%(refname:short)', 'refs/tags'], { cwd: repo, allowFail: true })
+    // the last --sort key is the primary one: creation date first, version-aware name for ties (tags made in the same second)
+    const r = await git.run(['for-each-ref', '--sort=-v:refname', '--sort=-creatordate', '--format=%(refname:short)', 'refs/tags'], { cwd: repo, allowFail: true })
     const tag = r.stdout.split('\n').map((s) => s.trim()).find((t) => t && re.test(t))
     if (!tag) throw new Error(`No tag matches ${p.tagPattern ?? 'deployed/*'}`)
     return tag
