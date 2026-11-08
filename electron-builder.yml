@@ -29,6 +29,9 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+portable:
+  artifactName: ${productName}-${version}-win-${arch}-portable.${ext}
 linux:
   target: [AppImage, deb, rpm]
   category: Development
