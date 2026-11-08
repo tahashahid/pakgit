@@ -14,6 +14,7 @@ import * as cleanup from './cleanup'
 import { postSlack, slackNotifier } from './notify'
 import { probeRepo } from './probes'
 import { configureHostingFor, hostingFor } from './hosting'
+import * as updater from './updater'
 import { configureTrackerFor, setActiveTrackerOrg, tracker, trackerFor } from './tracker'
 import { linearLogin, linearLogout, OAUTH_REDIRECT } from './tracker/oauth'
 import type { BranchTarget, CommitOptions, CreateReleaseRequest, DiffRequest, FileArea, Freeze, IssueQuery, OrgExport, Organization, PrepareOptions, ProbeResult, ReleaseSelection, RepoEntry, RepoPipelineOverride, StartWorkRequest, TrackerAuth, TrackerConfig, TrackerSettings } from '@shared/types'
@@ -240,7 +241,13 @@ function buildMenu(): void {
       ]
     },
     { role: 'windowMenu' },
-    { role: 'help', submenu: [{ label: 'PakGit on GitHub', click: () => shell.openExternal('https://github.com/') }] }
+    { role: 'help', submenu: [
+      { label: 'Check for Updates…', click: send('app:check-updates') },
+      { label: 'Release Notes', click: () => void updater.openReleases() },
+      { type: 'separator' },
+      { label: 'PakGit on GitHub', click: () => shell.openExternal('https://github.com/tahashahid/pakgit') },
+      { label: 'Workflow Guide', click: () => shell.openExternal('https://github.com/tahashahid/pakgit/blob/main/docs/WORKFLOW.md') }
+    ] }
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
@@ -514,6 +521,10 @@ function registerIpc(): void {
   handle('git:setUpstream', (repo: string, b: string, u: string) => git.setUpstream(repo, b, u))
   handle('git:emptyCommit', (repo: string, m: string) => git.emptyCommit(repo, m))
   handle('git:logHistory', () => git.getLogHistory())
+  handle('update:status', () => updater.updateStatus())
+  handle('update:check', () => updater.checkForUpdates(false))
+  handle('update:install', () => updater.installUpdate())
+  handle('update:releases', () => updater.openReleases())
 
   handle('os:terminal', (repo: string) => {
     if (process.platform === 'darwin') spawn('open', ['-a', 'Terminal', repo], { detached: true }).unref()
@@ -550,6 +561,9 @@ app.whenReady().then(() => {
   registerIpc()
   buildMenu()
   createWindow()
+  // in-app updates: report state to every window, check shortly after start when installed
+  updater.onUpdateStatus((st) => broadcast('update:status', st))
+  if (app.isPackaged && !process.env.PAKGIT_SCREENSHOT) setTimeout(() => void updater.checkForUpdates(true), 8000)
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

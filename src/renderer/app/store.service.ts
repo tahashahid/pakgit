@@ -1,5 +1,5 @@
 import { Injectable, computed, effect, signal } from '@angular/core'
-import type { BlameLine, Commit, CommitDetails, ConfigSyncState, FileEntry, GitLogLine, HostingStatus, NextRelease, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, ReleaseRecord, ReleaseSelection, RepoEntry, RepoStatus, SavedView, Settings, StashInfo, SubmoduleInfo, TrackerStatus, TrackerTeam, WorkIndex, WorkspaceState, WorktreeInfo } from '@shared/types'
+import type { BlameLine, Commit, CommitDetails, ConfigSyncState, FileEntry, GitLogLine, HostingStatus, NextRelease, OrgOverview, Organization, RebaseTodoEntry, Refs, ReleaseAnalysis, ReleaseRecord, ReleaseSelection, RepoEntry, RepoStatus, SavedView, Settings, StashInfo, SubmoduleInfo, TrackerStatus, TrackerTeam, UpdateStatus, WorkIndex, WorkspaceState, WorktreeInfo } from '@shared/types'
 
 export type Perspective = 'standard' | 'log' | 'worktree' | 'release' | 'organization'
 export type OrgTab = 'overview' | 'work' | 'ready' | 'releases'
@@ -50,6 +50,8 @@ export class Store {
   readonly rebase = signal<RebaseSpec | null>(null)
   readonly dialog = signal<{ spec: DialogSpec; resolve: (v: DialogResult) => void } | null>(null)
   readonly gitVersion = signal('')
+  readonly update = signal<UpdateStatus | null>(null)
+  readonly updateDismissed = signal(false)
   // release planning
   readonly release = signal<ReleaseAnalysis | null>(null)
   readonly releaseLoading = signal(false)
@@ -84,6 +86,9 @@ export class Store {
   // phase 3: releases, hosting
   readonly releases = signal<ReleaseRecord[]>([])
   readonly releasesLoading = signal(false)
+  /** the records were read at least once for this organization (an empty list must not trigger another load) */
+  readonly releasesLoaded = signal(false)
+  readonly trackerTeamsLoaded = signal(false)
   readonly hostingStatus = signal<HostingStatus | null>(null)
   /** Ready ▸ Promote selected…: the Release dialog is open with this selection */
   readonly releaseDraft = signal<ReleaseDraft | null>(null)
@@ -139,6 +144,8 @@ export class Store {
       const entry = list.find((r) => r.path === last) ?? list[0] ?? null
       if (entry) this.openRepo(entry)
     })
+    this.api.updateStatus?.().then((s) => this.update.set(s)).catch(() => undefined)
+    this.api.onUpdateStatus?.((s) => { this.update.set(s); if (s.state === 'ready' || s.state === 'error' && s.error) this.updateDismissed.set(false) })
     this.api.getGitLog().then((l) => this.output.set(l))
     this.api.onGitLog((line) => this.output.update((o) => [...o.slice(-499), line]))
     this.api.onRepoChanged((p) => {
@@ -219,7 +226,7 @@ export class Store {
   async switchOrg(id: string): Promise<void> {
     if (id === this.activeOrgId()) return
     this.workspace.set(await this.api.orgSetActive(id)); this.org.set(await this.api.orgGet(id))
-    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null); this.index.set(null); this.trackerTeams.set([]); this.orgGroup.set(null); this.indexError.set(null); this.overviewError.set(null); this.readyTab.set(''); this.readyText.set(''); this.releases.set([]); this.hostingStatus.set(null); this.configSync.set(null); this.nextReleases.set([]); this.configDismissed.set(null)
+    this.overview.set(null); this.release.set(null); this.trackerStatus.set(null); this.index.set(null); this.trackerTeams.set([]); this.orgGroup.set(null); this.indexError.set(null); this.overviewError.set(null); this.readyTab.set(''); this.readyText.set(''); this.releases.set([]); this.releasesLoaded.set(false); this.trackerTeamsLoaded.set(false); this.hostingStatus.set(null); this.configSync.set(null); this.nextReleases.set([]); this.configDismissed.set(null)
     const list = await this.reloadRepos()
     const last = LS.get<Record<string, string>>('lastRepoByOrg', {})[id]
     const entry = list.find((r) => r.path === last) ?? list[0] ?? null
@@ -247,10 +254,10 @@ export class Store {
     this.indexPending = p
     return p
   }
-  async loadTrackerTeams(): Promise<void> { try { this.trackerTeams.set(await this.api.trackerTeams()) } catch { this.trackerTeams.set([]) } }
+  async loadTrackerTeams(): Promise<void> { try { this.trackerTeams.set(await this.api.trackerTeams()) } catch { this.trackerTeams.set([]) } finally { this.trackerTeamsLoaded.set(true) } }
   async loadReleases(): Promise<void> {
     const id = this.activeOrgId(); this.releasesLoading.set(true)
-    try { const list = await this.api.orgReleases(id); if (this.activeOrgId() === id) this.releases.set(list) } catch (e) { this.toast('error', `Releases: ${e instanceof Error ? e.message : String(e)}`) } finally { this.releasesLoading.set(false) }
+    try { const list = await this.api.orgReleases(id); if (this.activeOrgId() === id) { this.releases.set(list); this.releasesLoaded.set(true) } } catch (e) { this.releasesLoaded.set(true); this.toast('error', `Releases: ${e instanceof Error ? e.message : String(e)}`) } finally { this.releasesLoading.set(false) }
   }
   async refreshHosting(): Promise<void> { try { this.hostingStatus.set(await this.api.orgHostingStatus(this.activeOrgId())) } catch { this.hostingStatus.set(null) } }
   /** after a release changed: records, index and overview */
@@ -331,6 +338,12 @@ export class Store {
   setLogPath(p: string | null): void { this.logPath.set(p); this.logLimit.set(0) }
   loadMore(): void { this.logLimit.set(this.effectiveLogLimit() + 500) }
   toggleTheme(): void { this.theme.update((t) => (t === 'dark' ? 'light' : 'dark')) }
+  async checkForUpdates(): Promise<void> {
+    const s = await this.api.checkForUpdates(); this.update.set(s)
+    if (s.state === 'up-to-date') this.toast('info', `PakGit ${s.version} is up to date`)
+    else if (s.state === 'unsupported') this.toast('info', s.error ?? 'Updates are checked in the installed app only')
+    else if (s.state === 'error' && s.error) this.toast('error', `Update check: ${s.error}`)
+  }
 
   prompt(spec: DialogSpec): Promise<DialogResult> {
     return new Promise((resolve) => this.dialog.set({ spec, resolve: (v) => { this.dialog.set(null); resolve(v) } }))

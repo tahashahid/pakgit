@@ -27,6 +27,16 @@ import { ContextMenu } from './ui/context-menu'
   template: `
     <div class="app">
       <pg-toolbar />
+      @if (store.update(); as u) {
+        @if (!store.updateDismissed() && (u.state === 'ready' || u.state === 'downloading' || (u.state === 'error' && u.error))) {
+          <div class="state-banner update">
+            @if (u.state === 'ready') { <span>PakGit {{ u.available }} is downloaded. Restart to update.</span><span style="flex:1"></span><button class="btn small primary" (click)="store.api.installUpdate()">Restart and update</button> }
+            @else if (u.state === 'downloading') { <span>Downloading PakGit {{ u.available }}… {{ u.percent ?? 0 }}%</span><span style="flex:1"></span> }
+            @else { <span>Update check failed: {{ u.error }}</span><span style="flex:1"></span><button class="btn small" (click)="store.api.openReleases()">Open releases</button> }
+            <button class="btn small ghost" (click)="store.updateDismissed.set(true)">Dismiss</button>
+          </div>
+        }
+      }
       @if (!store.repo() && store.perspective() !== 'organization') {
         <div class="welcome">
           <img src="logo.svg" alt="" width="96" height="96" style="border-radius:22px" />
@@ -125,7 +135,8 @@ export class App {
       'view:organization': () => s.perspective.set('organization'),
       'org:switch': () => s.perspective.set('organization'),
       'view:quick-open': () => s.showQuickOpen.set(true),
-      'view:theme': () => s.toggleTheme(), 'view:settings': () => s.showSettings.set(true)
+      'view:theme': () => s.toggleTheme(), 'view:settings': () => s.showSettings.set(true),
+      'app:check-updates': () => void s.checkForUpdates()
     }
     window.pakgitMenu.on((action) => void map[action]?.())
   }
