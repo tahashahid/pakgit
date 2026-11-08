@@ -128,7 +128,8 @@ Signing is optional and configured through repository secrets: `CSC_LINK` (base6
 (set `notarize: true` in `electron-builder.yml` once they exist); `WIN_CSC_LINK` and
 `WIN_CSC_KEY_PASSWORD` for Windows. Without them the workflow still produces working, unsigned
 installers. The **CI** workflow runs the typecheck and the backend tests on every push and pull
-request.
+request. Both workflows use Node 24 (npm 11), the version that writes `package-lock.json` here;
+an older npm reads the lock file differently and refuses `npm ci`.
 
 ## Development
 
